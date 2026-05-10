@@ -366,6 +366,123 @@ Exactly 5 picks. Real tickers. Concrete dollar levels. priceHistory should be 5 
   };
 }
 
+// ============================================================
+// NEWS PULSE — political / macro / tech briefing
+// ============================================================
+export async function fetchNewsPulse(apiKey, { mode }) {
+  const m = MODES[mode];
+  const today = new Date().toDateString();
+  const prompt = `You are a markets-focused news analyst. Today is ${today}.
+
+Use web_search (max ${m.regimeSearches}) for THIS WEEK's market-moving news across:
+- POLITICAL: tariffs, trade policy, elections, regulatory actions, geopolitical risk (Russia/China/Mideast)
+- MACRO: Fed commentary, CPI/jobs/GDP prints, central bank moves, currency moves
+- TECH: AI breakthroughs, chip news (NVDA/TSM/AMD/AVGO), big tech earnings/guidance, antitrust
+- POLICY: executive orders, congressional bills affecting sectors (energy, healthcare, defense)
+
+Return ONLY this JSON (no markdown, no preamble):
+{
+  "headline": "1 sentence — the single biggest market-moving theme right now",
+  "sentiment": "Risk-On | Risk-Off | Mixed",
+  "political": [
+    { "title": "specific event/headline", "summary": "1-2 sentences", "tickers": ["AFFECTED", "TICKERS"], "impact": "high|medium|low", "direction": "bullish|bearish|mixed" }
+  ],
+  "macro": [
+    { "title": "specific event", "summary": "1-2 sentences", "tickers": ["TICKERS"], "impact": "high|medium|low", "direction": "bullish|bearish|mixed" }
+  ],
+  "tech": [
+    { "title": "specific event", "summary": "1-2 sentences", "tickers": ["TICKERS"], "impact": "high|medium|low", "direction": "bullish|bearish|mixed" }
+  ],
+  "policy": [
+    { "title": "specific event", "summary": "1-2 sentences", "tickers": ["TICKERS"], "impact": "high|medium|low", "direction": "bullish|bearish|mixed" }
+  ],
+  "themes": [
+    { "theme": "named theme", "rationale": "1 sentence", "longs": ["TICKER"], "shorts": ["TICKER"] }
+  ],
+  "asOf": "${new Date().toISOString()}"
+}
+
+3-5 items per category. Real headlines. Specific tickers.`;
+
+  const { parsed, usage } = await callClaude(apiKey, prompt, mode, m.regimeTokens, m.regimeSearches);
+  return { data: parsed, usage };
+}
+
+// ============================================================
+// TICKER DEEP DIVE — focused research on one symbol
+// ============================================================
+export async function fetchTickerDeepDive(apiKey, ticker, { mode }) {
+  const m = MODES[mode];
+  const today = new Date().toDateString();
+  const symbol = String(ticker || '').toUpperCase().trim();
+  if (!symbol || symbol.length > 10) {
+    throw new ApiError(KNOWN_ERROR_KINDS.UNKNOWN, `Invalid ticker: "${ticker}"`);
+  }
+
+  const prompt = `You are an equity research analyst. Today is ${today}.
+Deep-dive ${symbol}. Use web_search (max ${m.industrySearches}) to gather:
+- Latest news (last 7 days) — headlines that moved the stock
+- Recent earnings — beat/miss, guidance, analyst reactions
+- Smart money: insider Form 4, unusual options, dark pool prints, 13F changes
+- Technical setup — current price, key support/resistance, RSI, recent pattern
+- Upcoming catalysts (next 30 days)
+- Top 3 risks
+- Forward outlook — bull case, bear case, base case 6-month target
+
+Return ONLY this JSON (no markdown, no preamble):
+{
+  "ticker": "${symbol}",
+  "company": "Full Name",
+  "currentPrice": 123.45,
+  "dailyChange": "+X.X%",
+  "ytdChange": "+X.X%",
+  "marketCap": "$XB",
+  "sector": "name",
+  "verdict": "Strong Buy | Buy | Hold | Sell",
+  "convictionScore": 85,
+  "snapshot": "3 sentences — the elevator pitch on this stock RIGHT NOW",
+  "recentNews": [
+    { "date": "YYYY-MM-DD", "headline": "specific", "impact": "high|medium|low", "direction": "bullish|bearish|neutral" }
+  ],
+  "earnings": {
+    "lastDate": "YYYY-MM-DD", "result": "EPS/Rev vs est", "guidance": "raised|lowered|maintained",
+    "nextDate": "YYYY-MM-DD", "expectedMove": "±X%"
+  },
+  "smartMoney": {
+    "darkPoolSentiment": "Bullish|Neutral|Bearish",
+    "institutionalFlow": "Net buying|Net selling|Mixed",
+    "insiderActivity": "specific names + sizes if available",
+    "optionsFlow": "C/P ratio + notable strikes",
+    "score": 75
+  },
+  "technicals": {
+    "trend": "label", "keyLevels": "support $X, resistance $Y",
+    "rsi": "value", "pattern": "specific", "volume": "above/below avg"
+  },
+  "catalysts": [
+    { "date": "YYYY-MM-DD", "event": "specific", "impact": "high|medium|low" }
+  ],
+  "risks": ["risk 1", "risk 2", "risk 3"],
+  "outlook": {
+    "bullCase": "1-2 sentences + price target",
+    "bearCase": "1-2 sentences + downside target",
+    "baseCase": "1-2 sentences + 6-month target"
+  },
+  "tradePlan": {
+    "entry": "$X-$Y", "stop": "$X (% below)", "target": "$X (% gain)", "horizon": "swing|position|long-term"
+  },
+  "asOf": "${new Date().toISOString()}"
+}
+
+Real numbers. Concrete details.`;
+
+  const { parsed, usage } = await callClaude(apiKey, prompt, mode, Math.min(m.industryTokens, 8000), m.industrySearches);
+  return { data: parsed, usage };
+}
+
+// ============================================================
+// CACHE — regime
+// ============================================================
 const REGIME_TTL_MS = 5 * 60 * 1000;
 export function loadCachedRegime(mode, risk, horizon) {
   try {

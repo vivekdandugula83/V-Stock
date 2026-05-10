@@ -38,9 +38,23 @@ export function aggregate(industryData, industries) {
     return { allPicks, sectorAgg, stats: null, topConviction: [], catalysts: [], nextDayBullish: [] };
   }
 
-  const topConviction = [...allPicks]
-    .sort((a, b) => (b.score || 0) - (a.score || 0))
-    .slice(0, 8);
+  // Composite scoring: conviction × smart money × catalyst weight
+  const convictionWeight = { high: 1.2, medium: 1.0, low: 0.8 };
+  const actionWeight = { 'strong buy': 1.15, buy: 1.05, accumulate: 1.0, watch: 0.85 };
+  const scored = allPicks.map((p) => {
+    const baseScore = p.score || 0;
+    const cw = convictionWeight[(p.conviction || '').toLowerCase()] || 1.0;
+    const aw = actionWeight[(p.action || '').toLowerCase()] || 1.0;
+    const smartBonus = (p.smartMoney?.score || 50) / 100; // 0.5 baseline
+    const catalystBonus = Math.min((p.catalysts?.length || 0) * 2, 8);
+    const bullishBonus = /bull/i.test(p.nextDayForecast?.bias || '') ? 5 : 0;
+    const composite = (baseScore * cw * aw) + (smartBonus * 10) + catalystBonus + bullishBonus;
+    return { ...p, composite };
+  });
+
+  const topConviction = [...scored]
+    .sort((a, b) => (b.composite || 0) - (a.composite || 0))
+    .slice(0, 12);
 
   const cmap = { high: 3, medium: 2, low: 1 };
   const nextDayBullish = allPicks
@@ -89,4 +103,49 @@ export function aggregate(industryData, industries) {
   };
 
   return { allPicks, sectorAgg, stats, topConviction, catalysts: catalystEntries, nextDayBullish };
+}
+
+// ============================================================
+// Dark signals leaderboard — rank tickers by signal strength
+// ============================================================
+export function darkSignalsLeaderboard(allPicks) {
+  if (!Array.isArray(allPicks) || allPicks.length === 0) return [];
+
+  const scored = allPicks.map((p) => {
+    const sm = p.smartMoney || {};
+    let signalScore = sm.score || 0;
+    let signalDirection = 0; // -1 bear, 0 mixed, 1 bull
+    const reasons = [];
+
+    const dpSent = String(sm.darkPoolSentiment || '').toLowerCase();
+    if (dpSent.includes('bull')) { signalScore += 12; signalDirection += 1; reasons.push('dark-pool bullish'); }
+    else if (dpSent.includes('bear')) { signalScore += 12; signalDirection -= 1; reasons.push('dark-pool bearish'); }
+
+    const flow = String(sm.institutionalFlow || '').toLowerCase();
+    if (flow.includes('net buying')) { signalScore += 10; signalDirection += 1; reasons.push('institutional buying'); }
+    else if (flow.includes('net selling')) { signalScore += 10; signalDirection -= 1; reasons.push('institutional selling'); }
+
+    const insider = String(sm.insiderActivity || '').toLowerCase();
+    if (/(buy|purchase|acquired)/.test(insider) && !/no\s+/.test(insider)) {
+      signalScore += 6; signalDirection += 1; reasons.push('insider buys');
+    } else if (/(sell|sold|disposed)/.test(insider) && !/no\s+/.test(insider)) {
+      signalScore += 6; signalDirection -= 1; reasons.push('insider sells');
+    }
+
+    const opts = String(sm.optionsFlow || '').toLowerCase();
+    if (/(call|bullish|c\/p\s*[<])/.test(opts)) { signalScore += 4; signalDirection += 1; reasons.push('call-heavy options'); }
+    else if (/(put|bearish|c\/p\s*[>])/.test(opts)) { signalScore += 4; signalDirection -= 1; reasons.push('put-heavy options'); }
+
+    return {
+      ...p,
+      signalScore: Math.min(100, signalScore),
+      signalDirection: signalDirection > 0 ? 'Bullish' : signalDirection < 0 ? 'Bearish' : 'Mixed',
+      signalReasons: reasons,
+    };
+  });
+
+  return scored
+    .filter((p) => (p.signalScore || 0) > 0)
+    .sort((a, b) => (b.signalScore || 0) - (a.signalScore || 0))
+    .slice(0, 15);
 }

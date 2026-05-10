@@ -2,23 +2,30 @@ import { useState, useEffect, useMemo } from 'react';
 import {
   AlertTriangle, Loader2, Sparkles, BarChart3, Clock, Shield, Eye,
   ArrowUpRight, Key, Lock, DollarSign, Gauge, Layers, LayoutDashboard, ListTree,
+  Target, Newspaper,
 } from 'lucide-react';
 
 import {
   INDUSTRIES, MODES, estimateCost,
-  fetchMarketRegime, fetchIndustryPicks,
+  fetchMarketRegime, fetchIndustryPicks, fetchNewsPulse,
   loadCachedRegime, saveCachedRegime,
 } from './lib/agent';
-import { aggregate } from './lib/aggregate';
+import { aggregate, darkSignalsLeaderboard } from './lib/aggregate';
 import { recordUsage } from './lib/usage';
 import RegimeCard from './components/RegimeCard';
 import IndustrySection from './components/IndustrySection';
 import Dashboard from './components/Dashboard';
 import ApiError from './components/ApiError';
 import UsageMeter from './components/UsageMeter';
+import Top10Panel from './components/Top10Panel';
+import DarkSignalsLeaderboard from './components/DarkSignalsLeaderboard';
+import NewsPulse from './components/NewsPulse';
+import TickerDeepDive from './components/TickerDeepDive';
+import WatchlistPanel from './components/WatchlistPanel';
 
 const KEY_STORAGE = 'athena_anthropic_key';
-const PREF_STORAGE = 'athena_prefs_v4';
+const PREF_STORAGE = 'athena_prefs_v5';
+const WATCHLIST_STORAGE = 'athena_watchlist_v5';
 
 const loadPrefs = () => {
   try { return JSON.parse(localStorage.getItem(PREF_STORAGE) || '{}'); }
@@ -47,6 +54,29 @@ export default function App() {
   const [regimeFromCache, setRegimeFromCache] = useState(false);
   const [industryData, setIndustryData] = useState({});
   const [usageRefresh, setUsageRefresh] = useState(0);
+  const [newsPulse, setNewsPulse] = useState(null);
+  const [newsPulseError, setNewsPulseError] = useState(null);
+  const [deepDiveTicker, setDeepDiveTicker] = useState(null);
+  const [watchlist, setWatchlist] = useState(() => {
+    try { return JSON.parse(localStorage.getItem(WATCHLIST_STORAGE) || '[]'); }
+    catch { return []; }
+  });
+
+  useEffect(() => {
+    try { localStorage.setItem(WATCHLIST_STORAGE, JSON.stringify(watchlist)); } catch {}
+  }, [watchlist]);
+
+  const toggleWatch = (ticker) => {
+    if (!ticker) return;
+    setWatchlist((prev) =>
+      prev.includes(ticker) ? prev.filter((t) => t !== ticker) : [...prev, ticker]
+    );
+  };
+
+  const recordUsageAndRefresh = (usage, modeKey, label) => {
+    recordUsage(usage, modeKey, label);
+    setUsageRefresh((n) => n + 1);
+  };
 
   useEffect(() => {
     savePrefs({ mode, risk, horizon, accountSize, selectedInd, view });
@@ -80,6 +110,7 @@ export default function App() {
   );
   const cost = estimateCost(mode, activeIndustries.length);
   const agg = useMemo(() => aggregate(industryData, activeIndustries), [industryData, activeIndustries]);
+  const darkSignals = useMemo(() => darkSignalsLeaderboard(agg.allPicks), [agg.allPicks]);
 
   const runAgent = async (forceRegimeRefresh = false) => {
     if (!apiKey) { setKeyEditing(true); return; }
@@ -92,6 +123,8 @@ export default function App() {
     setRegime(null);
     setRegimeError(null);
     setRegimeFromCache(false);
+    setNewsPulse(null);
+    setNewsPulseError(null);
     setIndustryData(Object.fromEntries(
       activeIndustries.map((i) => [i.id, { status: 'pending', data: null, error: null }])
     ));
@@ -106,16 +139,13 @@ export default function App() {
       try {
         const { data, usage } = await fetchMarketRegime(apiKey, { horizon, risk, mode });
         regimeResult = data;
-        recordUsage(usage, mode, 'regime');
-        setUsageRefresh((n) => n + 1);
+        recordUsageAndRefresh(usage, mode, 'regime');
         setRegime(regimeResult);
         saveCachedRegime(regimeResult, mode, risk, horizon);
       } catch (err) {
         setRegimeError(err);
         regimeFailed = true;
-        // If it's a credit/auth error, abort everything — no point trying sectors
         if (err.kind === 'credit' || err.kind === 'auth') {
-          // Mark all sectors as cancelled
           setIndustryData(Object.fromEntries(
             activeIndustries.map((i) => [i.id, { status: 'error', data: null, error: err }])
           ));
@@ -125,13 +155,22 @@ export default function App() {
       }
     }
 
+    // Kick off news pulse in parallel — non-blocking
+    fetchNewsPulse(apiKey, { mode })
+      .then(({ data, usage }) => {
+        recordUsageAndRefresh(usage, mode, 'news');
+        setNewsPulse(data);
+      })
+      .catch((err) => {
+        setNewsPulseError(err);
+      });
+
     const ctx = { horizon, risk, regime: regimeResult?.regime, mode };
     activeIndustries.forEach((ind) => {
       setIndustryData((p) => ({ ...p, [ind.id]: { status: 'loading', data: null, error: null } }));
       fetchIndustryPicks(apiKey, ind.id, ctx)
         .then(({ data, usage }) => {
-          recordUsage(usage, mode, ind.short);
-          setUsageRefresh((n) => n + 1);
+          recordUsageAndRefresh(usage, mode, ind.short);
           setIndustryData((p) => ({ ...p, [ind.id]: { status: 'done', data, error: null } }));
         })
         .catch((err) => {
@@ -161,8 +200,7 @@ export default function App() {
         horizon, risk, regime: regime?.regime, mode,
       });
       const ind = INDUSTRIES.find((i) => i.id === industryId);
-      recordUsage(usage, mode, ind?.short || industryId);
-      setUsageRefresh((n) => n + 1);
+      recordUsageAndRefresh(usage, mode, ind?.short || industryId);
       setIndustryData((p) => ({ ...p, [industryId]: { status: 'done', data, error: null } }));
     } catch (err) {
       setIndustryData((p) => ({ ...p, [industryId]: { status: 'error', data: null, error: err } }));
@@ -386,11 +424,17 @@ export default function App() {
         {hasResults && completedCount > 0 && (
           <>
             <div className="my-8 flex items-center justify-between gap-3 flex-wrap">
-              <div className="flex p-1 rounded-xl border border-stone-800 bg-stone-950/60">
+              <div className="flex p-1 rounded-xl border border-stone-800 bg-stone-950/60 flex-wrap">
                 <ViewTab active={view === 'dashboard'} onClick={() => setView('dashboard')}
-                         icon={<LayoutDashboard className="w-3.5 h-3.5" />} label="Dashboard" />
+                         icon={<LayoutDashboard className="w-3.5 h-3.5" />} label="Overview" />
+                <ViewTab active={view === 'top10'} onClick={() => setView('top10')}
+                         icon={<Target className="w-3.5 h-3.5" />} label="Top 10" />
+                <ViewTab active={view === 'signals'} onClick={() => setView('signals')}
+                         icon={<Eye className="w-3.5 h-3.5" />} label="Dark signals" />
+                <ViewTab active={view === 'news'} onClick={() => setView('news')}
+                         icon={<Newspaper className="w-3.5 h-3.5" />} label="News pulse" />
                 <ViewTab active={view === 'industries'} onClick={() => setView('industries')}
-                         icon={<ListTree className="w-3.5 h-3.5" />} label="By industry" />
+                         icon={<ListTree className="w-3.5 h-3.5" />} label="By sector" />
               </div>
               <div className="text-xs text-stone-500">
                 {loadingCount > 0 && `${loadingCount} loading · `}
@@ -399,9 +443,69 @@ export default function App() {
               </div>
             </div>
 
-            {view === 'dashboard' ? (
-              <Dashboard aggregate={agg} regime={regime} onSectorClick={scrollToSector} />
-            ) : (
+            {/* Watchlist always shown above main views */}
+            <div className="mb-6">
+              <WatchlistPanel
+                watchlist={watchlist}
+                onTickerClick={(t) => setDeepDiveTicker(t)}
+                onRemove={(t) => toggleWatch(t)}
+                onSearch={(t) => setDeepDiveTicker(t)}
+              />
+            </div>
+
+            {view === 'dashboard' && (
+              <div className="space-y-6">
+                <Dashboard aggregate={agg} regime={regime} onSectorClick={scrollToSector} />
+                {/* Always show top 10 in overview too */}
+                <Top10Panel
+                  picks={agg.topConviction}
+                  watchlist={watchlist}
+                  onTickerClick={(t) => setDeepDiveTicker(t)}
+                  onToggleWatch={toggleWatch}
+                />
+              </div>
+            )}
+
+            {view === 'top10' && (
+              <Top10Panel
+                picks={agg.topConviction}
+                watchlist={watchlist}
+                onTickerClick={(t) => setDeepDiveTicker(t)}
+                onToggleWatch={toggleWatch}
+              />
+            )}
+
+            {view === 'signals' && (
+              <DarkSignalsLeaderboard
+                items={darkSignals}
+                onTickerClick={(t) => setDeepDiveTicker(t)}
+              />
+            )}
+
+            {view === 'news' && (
+              <>
+                {newsPulse ? (
+                  <NewsPulse data={newsPulse} onTickerClick={(t) => setDeepDiveTicker(t)} />
+                ) : newsPulseError ? (
+                  <ApiError error={newsPulseError} contextLabel="News pulse failed" onRetry={() => {
+                    setNewsPulseError(null);
+                    fetchNewsPulse(apiKey, { mode })
+                      .then(({ data, usage }) => {
+                        recordUsageAndRefresh(usage, mode, 'news');
+                        setNewsPulse(data);
+                      })
+                      .catch((err) => setNewsPulseError(err));
+                  }} />
+                ) : (
+                  <div className="bg-white/5 border border-white/10 rounded-xl p-6 text-center text-white/50">
+                    <Loader2 className="w-5 h-5 animate-spin inline-block text-amber-300" />
+                    <div className="mt-2 text-sm">Loading news pulse...</div>
+                  </div>
+                )}
+              </>
+            )}
+
+            {view === 'industries' && (
               <div className="space-y-6">
                 {activeIndustries.map((ind) => (
                   <IndustrySection
@@ -419,14 +523,24 @@ export default function App() {
         )}
 
         {!hasResults && !running && apiKey && (
-          <div className="text-center py-16 px-4">
-            <div className="inline-flex items-center justify-center w-14 h-14 rounded-full bg-stone-900/60 border border-stone-800 mb-5">
-              <Eye className="w-6 h-6 text-stone-600" />
+          <>
+            <div className="text-center py-16 px-4">
+              <div className="inline-flex items-center justify-center w-14 h-14 rounded-full bg-stone-900/60 border border-stone-800 mb-5">
+                <Eye className="w-6 h-6 text-stone-600" />
+              </div>
+              <p className="text-stone-500 max-w-md mx-auto">
+                Configure your mandate and deploy. Cached regime keeps repeat runs cheap (~5 min TTL).
+              </p>
             </div>
-            <p className="text-stone-500 max-w-md mx-auto">
-              Configure your mandate and deploy. Cached regime keeps repeat runs cheap (~5 min TTL).
-            </p>
-          </div>
+            <div className="max-w-md mx-auto">
+              <WatchlistPanel
+                watchlist={watchlist}
+                onTickerClick={(t) => setDeepDiveTicker(t)}
+                onRemove={(t) => toggleWatch(t)}
+                onSearch={(t) => setDeepDiveTicker(t)}
+              />
+            </div>
+          </>
         )}
 
         {hasResults && (
@@ -438,6 +552,17 @@ export default function App() {
           </div>
         )}
       </div>
+
+      {/* Deep dive modal — top level so it can overlay everything */}
+      {deepDiveTicker && (
+        <TickerDeepDive
+          ticker={deepDiveTicker}
+          apiKey={apiKey}
+          mode={mode}
+          onClose={() => setDeepDiveTicker(null)}
+          onUsage={recordUsageAndRefresh}
+        />
+      )}
     </div>
   );
 }
