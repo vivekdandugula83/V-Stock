@@ -1,0 +1,182 @@
+# V-Stock
+
+Live market intelligence agent. Multi-stage AI workflow that scans the entire market for today's top 50 movers, runs research on 10 picks per sector, ranks dark-data signals, synthesizes political/macro/tech news, and lets you deep-dive any ticker on demand.
+
+Calls the Anthropic API directly from the browser. Your API key never leaves your device.
+
+---
+
+## What V-Stock does on every run
+
+When you hit **Deploy Agent**, V-Stock fires four parallel research streams:
+
+1. **Market Regime** — indices, VIX, rates, sector rotation, this-week catalysts, tactical playbook
+2. **Daily Movers (Top 50)** — entire-market scan: top gainers, top losers, unusual volume, news catalysts, earnings movers, mixed across sectors and market caps
+3. **News Pulse** — political/macro/tech/policy briefing with affected tickers and trade themes
+4. **Sector Research** — 10 picks per sector across the 6 sectors you select, each with thesis, technicals, smart money, trade plan, next-day forecast
+
+Plus on demand:
+- **Ticker Deep Dive** — click any ticker anywhere → full single-stock research (news, earnings, smart money, technicals, catalysts, bull/base/bear cases, trade plan)
+- **Persistent Watchlist** — star picks to track across sessions
+
+---
+
+## Six tabs
+
+| Tab            | What it shows |
+|----------------|---------------|
+| **Daily Movers** | Top 50 stocks moving today + finviz-style market heatmap. Filter by Gainers/Losers/Volume/News/Earnings, sort by gain or trend score, search ticker. Each row has live-style sparkline. |
+| **Research**   | Top 10 conviction picks across all sectors using composite scoring (score × conviction × smart-money × catalysts × bullish-bias) |
+| **Dark Signals** | Up to 15 tickers ranked by smart-money signal strength: dark-pool sentiment, institutional flow, insider Form 4, options flow |
+| **News Pulse** | Political / Macro / Tech / Policy news items with affected tickers + Trade Themes (longs vs shorts) |
+| **Overview**   | Hero stats, sector heatmap, volatility scatter, catalyst timeline, next-day forecasts |
+| **By Sector**  | All 10 picks per sector with full detail |
+
+---
+
+## Why no live "credits remaining" number?
+
+Anthropic doesn't expose a public balance endpoint for regular API keys. The Usage and Cost API requires an Admin key (`sk-ant-admin…`) most accounts don't have.
+
+So V-Stock does the next-best thing: **tracks every API response's `usage` block and sums real spend locally**. The numbers in the meter at the top come from actual returned token counts at current public pricing — not estimates. When a request fails with `insufficient_balance_error`, the app tells you immediately and links you to billing.
+
+---
+
+## Quick start
+
+### Option A — Netlify drag-and-drop (60 seconds)
+
+1. Unzip `v-stock.zip` (or `v-stock-dist-only.zip`)
+2. Open https://app.netlify.com/drop
+3. Drag the **`dist/`** folder onto the page
+4. Open the URL Netlify gives you
+5. Paste your Anthropic API key (get one at https://console.anthropic.com/settings/keys)
+6. Add at least **$10 in credits** at https://console.anthropic.com/settings/billing
+7. Hit **Deploy Agent**
+
+### Option B — Git + Netlify dashboard
+
+```bash
+unzip v-stock.zip
+cd athena   # repo root is "athena" — rename if you like
+git remote add origin <your-repo-url>
+git push -u origin main
+```
+
+Then in Netlify: **Add new site → Import from Git** → pick the repo. Build settings are already in `netlify.toml`.
+
+### Option C — Run locally
+
+```bash
+npm install
+npm run dev   # localhost:5173
+```
+
+---
+
+## Modes & cost
+
+V-Stock now runs **4 parallel API calls** plus per-sector calls (was 1+sectors in v5). Costs reflect that:
+
+| Mode      | Sectors | Picks/sector | Daily movers | News pulse | Approx cost/run |
+|-----------|---------|--------------|--------------|------------|-----------------|
+| Express   | 3       | 10           | 50           | yes        | ~$0.30          |
+| Standard  | 6       | 10           | 50           | yes        | ~$0.85          |
+| Deep      | 6       | 10           | 50           | yes (Sonnet) | ~$2.40        |
+
+Plus ~$0.05–0.10 per ticker deep-dive (on demand).
+
+Pricing per Anthropic public docs (May 2026): Haiku 4.5 at $1/$5 per M input/output tokens, Sonnet 4.6 at $3/$15, web search at $10 per 1,000 searches.
+
+**Tip:** Use Express for casual scans; Standard for daily research; Deep when you need maximum web-search depth.
+
+---
+
+## What "live graphs and tools" actually means here
+
+A few honest notes on what this is and isn't:
+
+- **Sparklines on every ticker** — these come from a 20-point price array the model returns based on its web-searched data. They're representative recent trajectory, not a streaming chart.
+- **Heatmap** — built from the model's daily % changes. Boxes are sized by market cap, colored by % move. Refreshes when you re-run the agent (not in real time).
+- **Volume / RSI / patterns** — pulled from the model's web search results. Useful for direction; verify exact numbers on TradingView, Yahoo, Finviz, or your broker before acting.
+
+If you want **truly live charts** that stream tick-by-tick, you need a market data API (Polygon, Alpha Vantage, IEX, your broker's WebSocket). V-Stock is built for **periodic deep research**, not live trading.
+
+---
+
+## Honest caveats
+
+This is a research aid, not a trading system.
+
+- **AI hallucinates.** The model may invent ticker fundamentals, misread filings, or report wrong percentage moves. Verify every pick against a primary source (SEC filings, exchange data, your broker) before risking capital.
+- **"Dark data" here is inferred, not real.** True dark-pool prints, live Form 4 data, institutional flow, and 13F changes come from paid feeds (Bloomberg, FactSet, Quiver, Unusual Whales, WhaleWisdom). What you see here is the model's best inference from publicly searchable info — useful as a heuristic, not as ground truth.
+- **News lags.** Web search results are typically minutes-to-hours old.
+- **Day-trade win rates are brutal.** Studies consistently show 70–90% of retail day traders lose money over time. Backtest and paper-trade first.
+
+Use this to generate ideas to investigate, not orders to place blindly.
+
+---
+
+## File structure
+
+```
+athena/                              # repo root (legacy folder name)
+├── dist/                            # Pre-built, drop into Netlify
+├── src/
+│   ├── App.jsx                      # Top-level state + run orchestration
+│   ├── main.jsx                     # Wraps App in ErrorBoundary
+│   ├── index.css
+│   ├── lib/
+│   │   ├── agent.js                 # Regime, sectors, news, movers, deep-dive
+│   │   ├── usage.js                 # Real-spend ledger
+│   │   └── aggregate.js             # Picks → dashboard + leaderboards
+│   └── components/
+│       ├── ErrorBoundary.jsx
+│       ├── ApiError.jsx
+│       ├── UsageMeter.jsx
+│       ├── DailyMovers.jsx          # Top 50 movers panel
+│       ├── MarketHeatmap.jsx        # Finviz-style heatmap
+│       ├── MiniChart.jsx            # Sparkline with fill
+│       ├── Top10Panel.jsx           # Conviction picks
+│       ├── DarkSignalsLeaderboard.jsx
+│       ├── NewsPulse.jsx
+│       ├── TickerDeepDive.jsx       # Per-ticker modal
+│       ├── WatchlistPanel.jsx
+│       ├── Dashboard.jsx
+│       ├── RegimeCard.jsx
+│       ├── SectorHeatmap.jsx
+│       ├── SmartMoneyPanel.jsx
+│       ├── VolatilityScatter.jsx
+│       ├── CatalystTimeline.jsx
+│       ├── NextDayForecast.jsx
+│       ├── IndustrySection.jsx
+│       ├── StatTile.jsx
+│       └── Sparkline.jsx
+├── package.json
+├── vite.config.js
+├── tailwind.config.js
+├── netlify.toml
+└── index.html
+```
+
+---
+
+## Troubleshooting
+
+**Black screen / app won't load** → ErrorBoundary should catch this. If it still happens, F12 → Console → copy the first red error.
+
+**"Credit balance is too low"** → meter banner shows this directly with billing link. Add credits at https://console.anthropic.com/settings/billing.
+
+**"CORS error" or "403"** → enable "Allow browser direct access" on your API key in the Anthropic console.
+
+**Daily movers fails with "parse" error** → 50 picks is a lot of output for the model. Click Retry; if it persists, switch to Express mode.
+
+**Sectors fail with "parse" error** → model returned malformed JSON. Click Retry on that sector.
+
+**Deep dive returning stale data** → click Refresh in the modal header.
+
+---
+
+## License
+
+MIT. Do whatever you want, but don't blame me if you lose money.
