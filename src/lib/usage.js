@@ -4,8 +4,8 @@
 
 import { realCost } from './agent';
 
-const LEDGER_KEY = 'athena_usage_ledger_v1';
-const BUDGET_KEY = 'athena_budget_v1';
+const LEDGER_KEY = 'vstock_usage_ledger_v1';
+const BUDGET_KEY = 'vstock_budget_v1';
 const MAX_ENTRIES = 200;
 
 export function recordUsage(usage, mode, label) {

@@ -3,7 +3,7 @@ import { X, Loader2, Search, TrendingUp, TrendingDown, Activity, AlertTriangle }
 import { fetchTickerDeepDive } from '../lib/agent.js';
 import ApiError from './ApiError.jsx';
 
-const CACHE_KEY = 'athena_deep_dives_v5';
+const CACHE_KEY = 'vstock_deep_dives_v5';
 const TTL_MS = 10 * 60 * 1000;
 
 function loadCache() {

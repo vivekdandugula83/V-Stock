@@ -16,37 +16,42 @@ export const MODES = {
     model: 'claude-haiku-4-5-20251001',
     inputPer1M: 1.0, outputPer1M: 5.0,
     regimeSearches: 2, industrySearches: 1,
-    industryTokens: 6000, regimeTokens: 2500,
+    industryTokens: 12000, regimeTokens: 2500,
     smartMoneyDepth: 'basic',
-    description: 'Haiku 4.5 · 1 search/sector · ~$0.12/run',
+    description: 'Haiku 4.5 · 1 search/sector · ~$0.20/run',
   },
   standard: {
     label: 'Standard',
     model: 'claude-haiku-4-5-20251001',
     inputPer1M: 1.0, outputPer1M: 5.0,
     regimeSearches: 3, industrySearches: 3,
-    industryTokens: 10000, regimeTokens: 3500,
+    industryTokens: 18000, regimeTokens: 3500,
     smartMoneyDepth: 'standard',
-    description: 'Haiku 4.5 · 3 searches/sector · ~$0.35/run',
+    description: 'Haiku 4.5 · 3 searches/sector · ~$0.65/run',
   },
   deep: {
     label: 'Deep',
     model: 'claude-sonnet-4-6',
     inputPer1M: 3.0, outputPer1M: 15.0,
     regimeSearches: 4, industrySearches: 5,
-    industryTokens: 14000, regimeTokens: 4000,
+    industryTokens: 24000, regimeTokens: 4000,
     smartMoneyDepth: 'full',
-    description: 'Sonnet 4.6 · 5 searches/sector · ~$1.10/run',
+    description: 'Sonnet 4.6 · 5 searches/sector · ~$2.20/run',
   },
 };
 
 export function estimateCost(modeKey, industryCount) {
   const m = MODES[modeKey];
   if (!m) return 0;
-  const searchCost = (m.regimeSearches + industryCount * m.industrySearches) * 0.01;
-  const totalCalls = 1 + industryCount;
+  // Calls: 1 regime + 1 news pulse + 1 movers + N sectors
+  const totalCalls = 3 + industryCount;
+  // Searches: regime + news + movers (regimeSearches each) + sectors
+  const totalSearches = (m.regimeSearches * 3) + (industryCount * m.industrySearches);
+  const searchCost = totalSearches * 0.01;
+  // Movers call has bigger output (~1.5x industry tokens)
+  const moversTokens = m.industryTokens * 1.5;
   const avgInputPerCall = 3500 + (m.industrySearches * 4500);
-  const avgOutputPerCall = (m.industryTokens + m.regimeTokens) / 2 / 2;
+  const avgOutputPerCall = ((m.industryTokens * industryCount) + m.regimeTokens * 2 + moversTokens) / totalCalls / 2;
   const inputCost = (totalCalls * avgInputPerCall * m.inputPer1M) / 1_000_000;
   const outputCost = (totalCalls * avgOutputPerCall * m.outputPer1M) / 1_000_000;
   return searchCost + inputCost + outputCost;
@@ -278,7 +283,7 @@ export async function fetchIndustryPicks(apiKey, industryId, { horizon, risk, re
 Current market regime: ${regime || 'unknown'}.
 Trade target: ${horizonGuidance} (${risk} risk).
 
-Use web_search (max ${m.industrySearches}) to find FIVE highest-quality trade setups in ${ind.label}.
+Use web_search (max ${m.industrySearches}) to find TEN highest-quality trade setups in ${ind.label}.
 
 For each: earnings (beat/miss, guidance), analyst actions, technical setup, catalysts in next 14 days,
 ${smartMoneyAsk}, recent 5-day price trajectory.
@@ -341,7 +346,7 @@ Return ONLY this JSON (no markdown, no preamble):
         "rationale": "1 sentence",
         "gapRisk": "low | medium | high"
       },
-      "priceHistory": [123.40, 124.10, 123.85, 125.20, 126.00],
+      "priceHistory": [120.40, 121.10, 119.85, 122.20, 123.00, 122.50, 124.10, 125.00, 124.50, 126.00, 125.80, 127.20, 128.00, 127.50, 128.90, 129.50, 130.00, 131.20, 130.80, 132.10],
       "catalysts": [
         { "date": "YYYY-MM-DD or 'TBD'", "event": "specific", "impact": "high|medium|low" }
       ],
@@ -350,7 +355,7 @@ Return ONLY this JSON (no markdown, no preamble):
   ]
 }
 
-Exactly 5 picks. Real tickers. Concrete dollar levels. priceHistory should be 5 numbers most-recent-last (use [] if unavailable).`;
+Exactly 10 picks. Real tickers. Concrete dollar levels. priceHistory should be 20 numbers most-recent-last (use [] if unavailable).`;
 
   const { parsed, usage } = await callClaude(apiKey, prompt, mode, m.industryTokens, m.industrySearches);
 
@@ -364,6 +369,58 @@ Exactly 5 picks. Real tickers. Concrete dollar levels. priceHistory should be 5 
     },
     usage,
   };
+}
+
+// ============================================================
+// DAILY MOVERS — top 50 stocks by daily momentum, mixed sectors
+// ============================================================
+export async function fetchDailyMovers(apiKey, { mode }) {
+  const m = MODES[mode];
+  const today = new Date().toDateString();
+  const prompt = `You are a market scanner. Today is ${today}.
+Use web_search (max ${Math.max(3, m.regimeSearches)}) for TODAY'S top-moving US-listed stocks across ALL sectors.
+
+Cover a mix of:
+- Top % gainers today (high-volume only — skip illiquid penny stocks)
+- Top % losers today (potential reversal/short candidates)
+- Highest unusual volume (volume vs 20-day avg)
+- Stocks with breaking news catalysts in last 24-48hr (earnings, FDA, M&A, AI partnerships, lawsuits, guidance)
+- Names with notable analyst actions today
+
+Mix large-cap (>$10B), mid-cap, and high-momentum small-cap. NO penny stocks under $2.
+
+Return ONLY this JSON (no markdown, no preamble):
+{
+  "asOf": "${new Date().toISOString()}",
+  "marketBreath": "1 sentence — advance/decline, breadth tone",
+  "movers": [
+    {
+      "rank": 1,
+      "ticker": "SYMBOL",
+      "company": "Full Name",
+      "sector": "Tech | Financials | Healthcare | Energy | Consumer | Industrials | Materials | Utilities | Real Estate | Communication",
+      "currentPrice": 123.45,
+      "dailyChangePct": "+8.4%",
+      "dailyChangeAbs": "+$9.65",
+      "volume": "X.XM (Y× avg)",
+      "marketCap": "$XB",
+      "moveType": "Gainer | Loser | UnusualVol | NewsCatalyst | AnalystUpgrade | EarningsBeat | EarningsMiss",
+      "catalyst": "specific reason it's moving today (1 sentence)",
+      "trendScore": 88,
+      "momentumLabel": "🔥 strong | ↑ up | → flat | ↓ down | 🧊 weak",
+      "shortInterest": "X% of float | unknown",
+      "rsi": "value or null",
+      "newsHook": "headline if news-driven, else null",
+      "priceHistory": [120.4, 121.1, 119.8, 122.2, 123.0, 122.5, 124.1, 125.0, 124.5, 126.0]
+    }
+  ]
+}
+
+Exactly 50 movers. Real tickers. Use real % moves from the actual market today.`;
+
+  const tokenBudget = Math.max(m.industryTokens * 1.5, 16000);
+  const { parsed, usage } = await callClaude(apiKey, prompt, mode, Math.floor(tokenBudget), Math.max(3, m.regimeSearches));
+  return { data: parsed, usage };
 }
 
 // ============================================================
@@ -486,7 +543,7 @@ Real numbers. Concrete details.`;
 const REGIME_TTL_MS = 5 * 60 * 1000;
 export function loadCachedRegime(mode, risk, horizon) {
   try {
-    const raw = localStorage.getItem('athena_regime_cache');
+    const raw = localStorage.getItem('vstock_regime_cache');
     if (!raw) return null;
     const c = JSON.parse(raw);
     if (c.mode !== mode || c.risk !== risk || c.horizon !== horizon) return null;
@@ -496,7 +553,7 @@ export function loadCachedRegime(mode, risk, horizon) {
 }
 export function saveCachedRegime(data, mode, risk, horizon) {
   try {
-    localStorage.setItem('athena_regime_cache', JSON.stringify({
+    localStorage.setItem('vstock_regime_cache', JSON.stringify({
       data, mode, risk, horizon, savedAt: Date.now(),
     }));
   } catch {}

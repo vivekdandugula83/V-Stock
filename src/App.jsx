@@ -2,12 +2,12 @@ import { useState, useEffect, useMemo } from 'react';
 import {
   AlertTriangle, Loader2, Sparkles, BarChart3, Clock, Shield, Eye,
   ArrowUpRight, Key, Lock, DollarSign, Gauge, Layers, LayoutDashboard, ListTree,
-  Target, Newspaper,
+  Target, Newspaper, Flame, Activity,
 } from 'lucide-react';
 
 import {
   INDUSTRIES, MODES, estimateCost,
-  fetchMarketRegime, fetchIndustryPicks, fetchNewsPulse,
+  fetchMarketRegime, fetchIndustryPicks, fetchNewsPulse, fetchDailyMovers,
   loadCachedRegime, saveCachedRegime,
 } from './lib/agent';
 import { aggregate, darkSignalsLeaderboard } from './lib/aggregate';
@@ -22,10 +22,12 @@ import DarkSignalsLeaderboard from './components/DarkSignalsLeaderboard';
 import NewsPulse from './components/NewsPulse';
 import TickerDeepDive from './components/TickerDeepDive';
 import WatchlistPanel from './components/WatchlistPanel';
+import DailyMovers from './components/DailyMovers';
+import MarketHeatmap from './components/MarketHeatmap';
 
-const KEY_STORAGE = 'athena_anthropic_key';
-const PREF_STORAGE = 'athena_prefs_v5';
-const WATCHLIST_STORAGE = 'athena_watchlist_v5';
+const KEY_STORAGE = 'vstock_anthropic_key';
+const PREF_STORAGE = 'vstock_prefs_v5';
+const WATCHLIST_STORAGE = 'vstock_watchlist_v5';
 
 const loadPrefs = () => {
   try { return JSON.parse(localStorage.getItem(PREF_STORAGE) || '{}'); }
@@ -46,7 +48,7 @@ export default function App() {
   const [horizon, setHorizon] = useState(initial.horizon || 'swing');
   const [accountSize, setAccountSize] = useState(initial.accountSize || '25000');
   const [selectedInd, setSelectedInd] = useState(initial.selectedInd || INDUSTRIES.map((i) => i.id));
-  const [view, setView] = useState(initial.view || 'dashboard');
+  const [view, setView] = useState(initial.view || 'movers');
 
   const [running, setRunning] = useState(false);
   const [regime, setRegime] = useState(null);
@@ -56,6 +58,9 @@ export default function App() {
   const [usageRefresh, setUsageRefresh] = useState(0);
   const [newsPulse, setNewsPulse] = useState(null);
   const [newsPulseError, setNewsPulseError] = useState(null);
+  const [movers, setMovers] = useState(null);
+  const [moversError, setMoversError] = useState(null);
+  const [moversLoading, setMoversLoading] = useState(false);
   const [deepDiveTicker, setDeepDiveTicker] = useState(null);
   const [watchlist, setWatchlist] = useState(() => {
     try { return JSON.parse(localStorage.getItem(WATCHLIST_STORAGE) || '[]'); }
@@ -125,6 +130,9 @@ export default function App() {
     setRegimeFromCache(false);
     setNewsPulse(null);
     setNewsPulseError(null);
+    setMovers(null);
+    setMoversError(null);
+    setMoversLoading(true);
     setIndustryData(Object.fromEntries(
       activeIndustries.map((i) => [i.id, { status: 'pending', data: null, error: null }])
     ));
@@ -149,13 +157,23 @@ export default function App() {
           setIndustryData(Object.fromEntries(
             activeIndustries.map((i) => [i.id, { status: 'error', data: null, error: err }])
           ));
+          setMoversLoading(false);
           setRunning(false);
           return;
         }
       }
     }
 
-    // Kick off news pulse in parallel — non-blocking
+    // Daily movers — parallel
+    fetchDailyMovers(apiKey, { mode })
+      .then(({ data, usage }) => {
+        recordUsageAndRefresh(usage, mode, 'movers');
+        setMovers(data);
+      })
+      .catch((err) => setMoversError(err))
+      .finally(() => setMoversLoading(false));
+
+    // News pulse — parallel
     fetchNewsPulse(apiKey, { mode })
       .then(({ data, usage }) => {
         recordUsageAndRefresh(usage, mode, 'news');
@@ -220,7 +238,7 @@ export default function App() {
   const loadingCount = Object.values(industryData).filter(
     (v) => v.status === 'loading' || v.status === 'pending'
   ).length;
-  const hasResults = regime || completedCount > 0;
+  const hasResults = regime || completedCount > 0 || movers;
   const accountNum = parseFloat(accountSize) || 0;
 
   // Find first credit/auth error to surface big banner
@@ -243,15 +261,14 @@ export default function App() {
               <div className="absolute inset-0 w-2 h-2 rounded-full bg-amber-400 blur-md" />
             </div>
             <span className="mono text-[11px] tracking-[0.25em] uppercase text-amber-300/80">
-              Equity Intelligence · Multi-Stage Agent
+              Live Market Intelligence · Multi-Stage AI Research
             </span>
           </div>
           <h1 className="display text-5xl sm:text-7xl font-light leading-[0.95] tracking-tight mb-4">
-            <span className="shimmer-text italic">Athena</span>
-            <span className="text-stone-100">.research</span>
+            <span className="shimmer-text italic">V-Stock</span>
           </h1>
           <p className="text-stone-400 text-base sm:text-lg max-w-2xl leading-relaxed">
-            Live market data · sector deep-dives · dark-data aggregation · next-day probabilistic forecasts.
+            Top 50 daily movers · 10 picks per sector · dark-data signals · political/macro/tech news pulse · per-ticker deep-dive.
           </p>
         </header>
 
@@ -421,29 +438,32 @@ export default function App() {
 
         {regime && <RegimeCard regime={regime} fromCache={regimeFromCache} />}
 
-        {hasResults && completedCount > 0 && (
+        {hasResults && (
           <>
             <div className="my-8 flex items-center justify-between gap-3 flex-wrap">
               <div className="flex p-1 rounded-xl border border-stone-800 bg-stone-950/60 flex-wrap">
-                <ViewTab active={view === 'dashboard'} onClick={() => setView('dashboard')}
-                         icon={<LayoutDashboard className="w-3.5 h-3.5" />} label="Overview" />
-                <ViewTab active={view === 'top10'} onClick={() => setView('top10')}
-                         icon={<Target className="w-3.5 h-3.5" />} label="Top 10" />
+                <ViewTab active={view === 'movers'} onClick={() => setView('movers')}
+                         icon={<Flame className="w-3.5 h-3.5" />} label="Daily Movers" />
+                <ViewTab active={view === 'research'} onClick={() => setView('research')}
+                         icon={<Target className="w-3.5 h-3.5" />} label="Research" />
                 <ViewTab active={view === 'signals'} onClick={() => setView('signals')}
                          icon={<Eye className="w-3.5 h-3.5" />} label="Dark signals" />
                 <ViewTab active={view === 'news'} onClick={() => setView('news')}
                          icon={<Newspaper className="w-3.5 h-3.5" />} label="News pulse" />
+                <ViewTab active={view === 'dashboard'} onClick={() => setView('dashboard')}
+                         icon={<LayoutDashboard className="w-3.5 h-3.5" />} label="Overview" />
                 <ViewTab active={view === 'industries'} onClick={() => setView('industries')}
                          icon={<ListTree className="w-3.5 h-3.5" />} label="By sector" />
               </div>
               <div className="text-xs text-stone-500">
-                {loadingCount > 0 && `${loadingCount} loading · `}
+                {moversLoading && '50 movers loading · '}
+                {loadingCount > 0 && `${loadingCount} sectors loading · `}
                 {errorCount > 0 && `${errorCount} failed · `}
-                {completedCount} of {activeIndustries.length} sectors complete
+                {completedCount > 0 && `${completedCount}/${activeIndustries.length} sectors`}
               </div>
             </div>
 
-            {/* Watchlist always shown above main views */}
+            {/* Watchlist always shown */}
             <div className="mb-6">
               <WatchlistPanel
                 watchlist={watchlist}
@@ -453,26 +473,58 @@ export default function App() {
               />
             </div>
 
-            {view === 'dashboard' && (
+            {/* DAILY MOVERS — Top 50 today */}
+            {view === 'movers' && (
               <div className="space-y-6">
-                <Dashboard aggregate={agg} regime={regime} onSectorClick={scrollToSector} />
-                {/* Always show top 10 in overview too */}
-                <Top10Panel
-                  picks={agg.topConviction}
-                  watchlist={watchlist}
-                  onTickerClick={(t) => setDeepDiveTicker(t)}
-                  onToggleWatch={toggleWatch}
-                />
+                {moversLoading && !movers && !moversError && (
+                  <div className="bg-white/5 border border-white/10 rounded-xl p-12 text-center">
+                    <Loader2 className="w-6 h-6 text-amber-300 animate-spin mx-auto mb-3" />
+                    <div className="text-sm text-white/60">Scanning the market for today's top 50 movers...</div>
+                    <div className="text-xs text-white/40 mt-1">Gainers · Losers · Unusual volume · News catalysts</div>
+                  </div>
+                )}
+                {moversError && (
+                  <ApiError error={moversError} contextLabel="Daily movers scan failed" onRetry={() => {
+                    setMoversError(null);
+                    setMoversLoading(true);
+                    fetchDailyMovers(apiKey, { mode })
+                      .then(({ data, usage }) => { recordUsageAndRefresh(usage, mode, 'movers'); setMovers(data); })
+                      .catch((err) => setMoversError(err))
+                      .finally(() => setMoversLoading(false));
+                  }} />
+                )}
+                {movers && (
+                  <>
+                    <DailyMovers
+                      data={movers}
+                      onTickerClick={(t) => setDeepDiveTicker(t)}
+                      watchlist={watchlist}
+                      onToggleWatch={toggleWatch}
+                    />
+                    <MarketHeatmap data={movers} onTickerClick={(t) => setDeepDiveTicker(t)} />
+                  </>
+                )}
               </div>
             )}
 
-            {view === 'top10' && (
-              <Top10Panel
-                picks={agg.topConviction}
-                watchlist={watchlist}
-                onTickerClick={(t) => setDeepDiveTicker(t)}
-                onToggleWatch={toggleWatch}
-              />
+            {/* RESEARCH — High-potential picks across sectors */}
+            {view === 'research' && (
+              <div className="space-y-6">
+                {completedCount === 0 ? (
+                  <div className="bg-white/5 border border-white/10 rounded-xl p-12 text-center">
+                    <Loader2 className="w-6 h-6 text-amber-300 animate-spin mx-auto mb-3" />
+                    <div className="text-sm text-white/60">Running sector specialists...</div>
+                    <div className="text-xs text-white/40 mt-1">{loadingCount} of {activeIndustries.length} working</div>
+                  </div>
+                ) : (
+                  <Top10Panel
+                    picks={agg.topConviction}
+                    watchlist={watchlist}
+                    onTickerClick={(t) => setDeepDiveTicker(t)}
+                    onToggleWatch={toggleWatch}
+                  />
+                )}
+              </div>
             )}
 
             {view === 'signals' && (
@@ -503,6 +555,10 @@ export default function App() {
                   </div>
                 )}
               </>
+            )}
+
+            {view === 'dashboard' && completedCount > 0 && (
+              <Dashboard aggregate={agg} regime={regime} onSectorClick={scrollToSector} />
             )}
 
             {view === 'industries' && (

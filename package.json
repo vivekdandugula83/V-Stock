@@ -1,9 +1,9 @@
 {
-  "name": "athena-research",
+  "name": "v-stock",
   "private": true,
-  "version": "1.0.0",
+  "version": "2.0.0",
   "type": "module",
-  "description": "Multi-stage AI agent for daily-trade equity research with dark-data signals.",
+  "description": "V-Stock — live market intelligence agent. Daily movers, sector research, dark signals, news pulse.",
   "scripts": {
     "dev": "vite",
     "build": "vite build",

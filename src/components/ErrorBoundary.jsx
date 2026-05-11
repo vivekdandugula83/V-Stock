@@ -15,7 +15,7 @@ export default class ErrorBoundary extends Component {
     this.setState({ errorInfo });
     // Log so devs can see in console
     // eslint-disable-next-line no-console
-    console.error('Athena ErrorBoundary caught:', error, errorInfo);
+    console.error('V-Stock ErrorBoundary caught:', error, errorInfo);
   }
 
   handleReset = () => {
@@ -25,9 +25,9 @@ export default class ErrorBoundary extends Component {
   handleHardReset = () => {
     try {
       // Don't clear the API key — just transient state and caches
-      localStorage.removeItem('athena_regime_cache');
-      localStorage.removeItem('athena_prefs_v3');
-      localStorage.removeItem('athena_prefs_v4');
+      localStorage.removeItem('vstock_regime_cache');
+      localStorage.removeItem('vstock_prefs_v3');
+      localStorage.removeItem('vstock_prefs_v4');
     } catch {}
     window.location.reload();
   };
