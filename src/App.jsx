@@ -1,16 +1,16 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import {
-  AlertTriangle, Loader2, Sparkles, BarChart3, Clock, Shield, Eye,
-  ArrowUpRight, Key, Lock, DollarSign, Gauge, Layers, LayoutDashboard, ListTree,
-  Target, Newspaper, Flame, Activity,
+  AlertTriangle, Loader2, Sparkles, Eye, Key, Lock,
+  DollarSign, Gauge, LayoutDashboard, ListTree, Target, Zap,
 } from 'lucide-react';
 
 import {
   INDUSTRIES, MODES, estimateCost,
-  fetchMarketRegime, fetchIndustryPicks, fetchNewsPulse, fetchDailyMovers,
+  fetchMarketRegime, fetchIndustryPicks,
   loadCachedRegime, saveCachedRegime,
 } from './lib/agent';
-import { aggregate, darkSignalsLeaderboard } from './lib/aggregate';
+import { RateLimitQueue, TIERS } from './lib/queue';
+import { aggregate } from './lib/aggregate';
 import { recordUsage } from './lib/usage';
 import RegimeCard from './components/RegimeCard';
 import IndustrySection from './components/IndustrySection';
@@ -18,37 +18,34 @@ import Dashboard from './components/Dashboard';
 import ApiError from './components/ApiError';
 import UsageMeter from './components/UsageMeter';
 import Top10Panel from './components/Top10Panel';
-import DarkSignalsLeaderboard from './components/DarkSignalsLeaderboard';
-import NewsPulse from './components/NewsPulse';
 import TickerDeepDive from './components/TickerDeepDive';
 import WatchlistPanel from './components/WatchlistPanel';
-import DailyMovers from './components/DailyMovers';
-import MarketHeatmap from './components/MarketHeatmap';
+import QueueStatus from './components/QueueStatus';
 
 const KEY_STORAGE = 'vstock_anthropic_key';
-const PREF_STORAGE = 'vstock_prefs_v5';
-const WATCHLIST_STORAGE = 'vstock_watchlist_v5';
+const PREF_STORAGE = 'vstock_prefs_v6';
+const WATCHLIST_STORAGE = 'vstock_watchlist_v6';
 
-const loadPrefs = () => {
+function loadPrefs() {
   try { return JSON.parse(localStorage.getItem(PREF_STORAGE) || '{}'); }
   catch { return {}; }
-};
-const savePrefs = (p) => {
+}
+function savePrefs(p) {
   try { localStorage.setItem(PREF_STORAGE, JSON.stringify(p)); } catch {}
-};
+}
 
 export default function App() {
   const [apiKey, setApiKey] = useState(() => localStorage.getItem(KEY_STORAGE) || '');
-  const [keyEditing, setKeyEditing] = useState(!localStorage.getItem(KEY_STORAGE));
-  const [keyInput, setKeyInput] = useState('');
+  const [keyEditing, setKeyEditing] = useState(!apiKey);
 
   const initial = loadPrefs();
   const [mode, setMode] = useState(initial.mode || 'standard');
-  const [risk, setRisk] = useState(initial.risk || 'moderate');
-  const [horizon, setHorizon] = useState(initial.horizon || 'swing');
-  const [accountSize, setAccountSize] = useState(initial.accountSize || '25000');
+  const [tier, setTier] = useState(initial.tier || 'tier1');
   const [selectedInd, setSelectedInd] = useState(initial.selectedInd || INDUSTRIES.map((i) => i.id));
-  const [view, setView] = useState(initial.view || 'movers');
+  const [view, setView] = useState(initial.view || 'top');
+
+  const queueRef = useRef(null);
+  const [activeQueue, setActiveQueue] = useState(null);
 
   const [running, setRunning] = useState(false);
   const [regime, setRegime] = useState(null);
@@ -56,11 +53,6 @@ export default function App() {
   const [regimeFromCache, setRegimeFromCache] = useState(false);
   const [industryData, setIndustryData] = useState({});
   const [usageRefresh, setUsageRefresh] = useState(0);
-  const [newsPulse, setNewsPulse] = useState(null);
-  const [newsPulseError, setNewsPulseError] = useState(null);
-  const [movers, setMovers] = useState(null);
-  const [moversError, setMoversError] = useState(null);
-  const [moversLoading, setMoversLoading] = useState(false);
   const [deepDiveTicker, setDeepDiveTicker] = useState(null);
   const [watchlist, setWatchlist] = useState(() => {
     try { return JSON.parse(localStorage.getItem(WATCHLIST_STORAGE) || '[]'); }
@@ -70,6 +62,10 @@ export default function App() {
   useEffect(() => {
     try { localStorage.setItem(WATCHLIST_STORAGE, JSON.stringify(watchlist)); } catch {}
   }, [watchlist]);
+
+  useEffect(() => {
+    savePrefs({ mode, selectedInd, view, tier });
+  }, [mode, selectedInd, view, tier]);
 
   const toggleWatch = (ticker) => {
     if (!ticker) return;
@@ -83,140 +79,123 @@ export default function App() {
     setUsageRefresh((n) => n + 1);
   };
 
-  useEffect(() => {
-    savePrefs({ mode, risk, horizon, accountSize, selectedInd, view });
-  }, [mode, risk, horizon, accountSize, selectedInd, view]);
-
-  const saveKey = () => {
-    const trimmed = keyInput.trim();
-    if (!trimmed.startsWith('sk-ant-')) {
-      alert('Anthropic API keys start with "sk-ant-".');
-      return;
-    }
-    localStorage.setItem(KEY_STORAGE, trimmed);
-    setApiKey(trimmed);
-    setKeyEditing(false);
-    setKeyInput('');
-  };
-
-  const clearKey = () => {
-    localStorage.removeItem(KEY_STORAGE);
-    setApiKey('');
-    setKeyEditing(true);
-  };
-
+  const activeIndustries = INDUSTRIES.filter((i) => selectedInd.includes(i.id));
   const toggleIndustry = (id) => {
-    setSelectedInd((prev) => prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]);
+    setSelectedInd((p) => (p.includes(id) ? p.filter((x) => x !== id) : [...p, id]));
   };
 
-  const activeIndustries = useMemo(
-    () => INDUSTRIES.filter((i) => selectedInd.includes(i.id)),
-    [selectedInd]
-  );
   const cost = estimateCost(mode, activeIndustries.length);
   const agg = useMemo(() => aggregate(industryData, activeIndustries), [industryData, activeIndustries]);
-  const darkSignals = useMemo(() => darkSignalsLeaderboard(agg.allPicks), [agg.allPicks]);
+
+  const completedCount = Object.values(industryData).filter((v) => v.status === 'done').length;
+  const errorCount = Object.values(industryData).filter((v) => v.status === 'error').length;
+  const loadingCount = Object.values(industryData).filter(
+    (v) => v.status === 'loading' || v.status === 'pending'
+  ).length;
+  const hasResults = regime || completedCount > 0;
+
+  // Detect fatal credit/auth error from any source
+  const fatalError = useMemo(() => {
+    if (regimeError && (regimeError.kind === 'credit' || regimeError.kind === 'auth')) return regimeError;
+    for (const id of Object.keys(industryData)) {
+      const err = industryData[id]?.error;
+      if (err && (err.kind === 'credit' || err.kind === 'auth')) return err;
+    }
+    return null;
+  }, [regimeError, industryData]);
+
+  const saveKey = () => {
+    const t = apiKey.trim();
+    if (t && t.startsWith('sk-ant-')) {
+      localStorage.setItem(KEY_STORAGE, t);
+      setKeyEditing(false);
+    } else {
+      alert('That doesn\'t look like a valid Anthropic API key. They start with sk-ant-');
+    }
+  };
 
   const runAgent = async (forceRegimeRefresh = false) => {
     if (!apiKey) { setKeyEditing(true); return; }
-    if (activeIndustries.length === 0) {
-      alert('Select at least one industry.');
-      return;
-    }
+    if (activeIndustries.length === 0) { alert('Select at least one sector.'); return; }
+
+    const tierCfg = TIERS[tier] || TIERS.tier1;
+    const queue = new RateLimitQueue({
+      concurrency: tierCfg.concurrency,
+      minSpacingMs: tierCfg.minSpacingMs,
+      maxRetries: 5,
+    });
+    queueRef.current = queue;
+    setActiveQueue(queue);
 
     setRunning(true);
     setRegime(null);
     setRegimeError(null);
     setRegimeFromCache(false);
-    setNewsPulse(null);
-    setNewsPulseError(null);
-    setMovers(null);
-    setMoversError(null);
-    setMoversLoading(true);
     setIndustryData(Object.fromEntries(
       activeIndustries.map((i) => [i.id, { status: 'pending', data: null, error: null }])
     ));
 
-    let regimeResult = forceRegimeRefresh ? null : loadCachedRegime(mode, risk, horizon);
-    let regimeFailed = false;
-
+    // 1. Market regime
+    let regimeResult = forceRegimeRefresh ? null : loadCachedRegime(mode, 'moderate', 'position');
     if (regimeResult) {
       setRegime(regimeResult);
       setRegimeFromCache(true);
     } else {
       try {
-        const { data, usage } = await fetchMarketRegime(apiKey, { horizon, risk, mode });
+        const { data, usage } = await queue.add(
+          () => fetchMarketRegime(apiKey, { horizon: 'position', risk: 'moderate', mode }),
+          'regime'
+        );
         regimeResult = data;
         recordUsageAndRefresh(usage, mode, 'regime');
         setRegime(regimeResult);
-        saveCachedRegime(regimeResult, mode, risk, horizon);
+        saveCachedRegime(regimeResult, mode, 'moderate', 'position');
       } catch (err) {
         setRegimeError(err);
-        regimeFailed = true;
         if (err.kind === 'credit' || err.kind === 'auth') {
+          queue.drain();
           setIndustryData(Object.fromEntries(
             activeIndustries.map((i) => [i.id, { status: 'error', data: null, error: err }])
           ));
-          setMoversLoading(false);
           setRunning(false);
           return;
         }
       }
     }
 
-    // Daily movers — parallel
-    fetchDailyMovers(apiKey, { mode })
-      .then(({ data, usage }) => {
-        recordUsageAndRefresh(usage, mode, 'movers');
-        setMovers(data);
-      })
-      .catch((err) => setMoversError(err))
-      .finally(() => setMoversLoading(false));
-
-    // News pulse — parallel
-    fetchNewsPulse(apiKey, { mode })
-      .then(({ data, usage }) => {
-        recordUsageAndRefresh(usage, mode, 'news');
-        setNewsPulse(data);
-      })
-      .catch((err) => {
-        setNewsPulseError(err);
-      });
-
-    const ctx = { horizon, risk, regime: regimeResult?.regime, mode };
-    activeIndustries.forEach((ind) => {
+    // 2. Sector value scans
+    const ctx = { horizon: 'position', risk: 'moderate', regime: regimeResult?.marketValuation, mode };
+    const sectorPromises = activeIndustries.map((ind) => {
       setIndustryData((p) => ({ ...p, [ind.id]: { status: 'loading', data: null, error: null } }));
-      fetchIndustryPicks(apiKey, ind.id, ctx)
-        .then(({ data, usage }) => {
-          recordUsageAndRefresh(usage, mode, ind.short);
-          setIndustryData((p) => ({ ...p, [ind.id]: { status: 'done', data, error: null } }));
-        })
-        .catch((err) => {
-          setIndustryData((p) => ({ ...p, [ind.id]: { status: 'error', data: null, error: err } }));
-        });
+      return queue.add(
+        () => fetchIndustryPicks(apiKey, ind.id, ctx),
+        ind.short
+      ).then(({ data, usage }) => {
+        recordUsageAndRefresh(usage, mode, ind.short);
+        setIndustryData((p) => ({ ...p, [ind.id]: { status: 'done', data, error: null } }));
+      }).catch((err) => {
+        setIndustryData((p) => ({ ...p, [ind.id]: { status: 'error', data: null, error: err } }));
+        if (err.kind === 'credit' || err.kind === 'auth') queue.drain();
+      });
     });
 
-    const checkDone = setInterval(() => {
-      setIndustryData((current) => {
-        const stillLoading = Object.values(current).some(
-          (v) => v.status === 'loading' || v.status === 'pending'
-        );
-        if (!stillLoading) {
-          clearInterval(checkDone);
-          setRunning(false);
-        }
-        return current;
-      });
-    }, 800);
+    await Promise.allSettled(sectorPromises);
+    setRunning(false);
+    setActiveQueue(null);
   };
 
   const retryIndustry = async (industryId) => {
     if (!apiKey) return;
     setIndustryData((p) => ({ ...p, [industryId]: { status: 'loading', data: null, error: null } }));
+    const tierCfg = TIERS[tier] || TIERS.tier1;
+    const q = new RateLimitQueue({ concurrency: 1, minSpacingMs: tierCfg.minSpacingMs, maxRetries: 4 });
     try {
-      const { data, usage } = await fetchIndustryPicks(apiKey, industryId, {
-        horizon, risk, regime: regime?.regime, mode,
-      });
+      const { data, usage } = await q.add(
+        () => fetchIndustryPicks(apiKey, industryId, {
+          horizon: 'position', risk: 'moderate', regime: regime?.marketValuation, mode,
+        }),
+        'retry'
+      );
       const ind = INDUSTRIES.find((i) => i.id === industryId);
       recordUsageAndRefresh(usage, mode, ind?.short || industryId);
       setIndustryData((p) => ({ ...p, [industryId]: { status: 'done', data, error: null } }));
@@ -225,83 +204,78 @@ export default function App() {
     }
   };
 
-  const scrollToSector = (sectorId) => {
-    setView('industries');
-    setTimeout(() => {
-      const el = document.getElementById(`sector-${sectorId}`);
-      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }, 100);
+  const scrollToSector = (id) => {
+    const el = document.getElementById(`sector-${id}`);
+    if (el) {
+      setView('industries');
+      setTimeout(() => el.scrollIntoView({ behavior: 'smooth', block: 'start' }), 100);
+    }
   };
 
-  const completedCount = Object.values(industryData).filter((v) => v.status === 'done').length;
-  const errorCount = Object.values(industryData).filter((v) => v.status === 'error').length;
-  const loadingCount = Object.values(industryData).filter(
-    (v) => v.status === 'loading' || v.status === 'pending'
-  ).length;
-  const hasResults = regime || completedCount > 0 || movers;
-  const accountNum = parseFloat(accountSize) || 0;
-
-  // Find first credit/auth error to surface big banner
-  const fatalError = regimeError && (regimeError.kind === 'credit' || regimeError.kind === 'auth')
-    ? regimeError
-    : Object.values(industryData)
-        .map((v) => v.error)
-        .find((e) => e && (e.kind === 'credit' || e.kind === 'auth'));
-
   return (
-    <div className="min-h-screen w-full" style={{
-      background: 'radial-gradient(ellipse at top, #1a1410 0%, #0a0908 50%, #050403 100%)',
-    }}>
-      <div className="grain relative max-w-7xl mx-auto px-5 sm:px-8 py-10 sm:py-14">
-
+    <div className="min-h-screen bg-stone-950 text-stone-100 grain">
+      <div className="max-w-6xl mx-auto px-4 sm:px-6 py-8 sm:py-12">
+        {/* HEADER */}
         <header className="mb-8">
-          <div className="flex items-center gap-3 mb-4">
-            <div className="relative">
-              <div className="w-2 h-2 rounded-full bg-amber-400 pulse-glow" />
-              <div className="absolute inset-0 w-2 h-2 rounded-full bg-amber-400 blur-md" />
-            </div>
+          <div className="flex items-center gap-2 mb-3">
+            <Sparkles className="w-3 h-3 text-amber-400" />
             <span className="mono text-[11px] tracking-[0.25em] uppercase text-amber-300/80">
-              Live Market Intelligence · Multi-Stage AI Research
+              Value-Investing Intelligence
             </span>
           </div>
           <h1 className="display text-5xl sm:text-7xl font-light leading-[0.95] tracking-tight mb-4">
             <span className="shimmer-text italic">V-Stock</span>
           </h1>
           <p className="text-stone-400 text-base sm:text-lg max-w-2xl leading-relaxed">
-            Top 50 daily movers · 10 picks per sector · dark-data signals · political/macro/tech news pulse · per-ticker deep-dive.
+            Find undervalued stocks using fundamentals. P/E · Forward P/E · revenue & EPS growth · 5-yr CAGR · SEC insider buying · volume — scored across 4 buckets into a single composite.
           </p>
         </header>
 
-        {/* API key */}
-        {keyEditing ? (
-          <KeyGate keyInput={keyInput} setKeyInput={setKeyInput} onSave={saveKey}
-                   onCancel={apiKey ? () => { setKeyEditing(false); setKeyInput(''); } : null} />
-        ) : (
-          <KeyStatus apiKey={apiKey} onEdit={() => setKeyEditing(true)} onClear={clearKey} />
+        {/* USAGE METER */}
+        <UsageMeter refresh={usageRefresh} />
+
+        {/* API KEY */}
+        {keyEditing && (
+          <div className="mb-6 p-4 rounded-xl border border-amber-400/30 bg-amber-950/15">
+            <div className="flex items-center gap-2 mb-3">
+              <Key className="w-4 h-4 text-amber-400" />
+              <span className="display text-sm text-amber-100">Add your Anthropic API key</span>
+            </div>
+            <div className="flex gap-2 mb-2">
+              <input
+                type="password"
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && saveKey()}
+                placeholder="sk-ant-api03-..."
+                className="flex-1 bg-stone-900/60 border border-stone-800 rounded-lg px-3 py-2 text-sm font-mono text-white placeholder:text-stone-600 focus:outline-none focus:border-amber-400/50"
+              />
+              <button onClick={saveKey} className="px-4 py-2 rounded-lg bg-amber-400/20 border border-amber-400/40 text-amber-200 hover:bg-amber-400/30 text-sm">
+                Save
+              </button>
+            </div>
+            <div className="text-[11px] text-stone-500 flex items-center gap-1.5">
+              <Lock size={9} /> Stored only in your browser. Get a key at{' '}
+              <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noreferrer" className="underline hover:text-amber-300">
+                console.anthropic.com
+              </a>
+            </div>
+          </div>
+        )}
+        {!keyEditing && apiKey && (
+          <div className="mb-6 flex items-center justify-between text-xs text-stone-500">
+            <span className="flex items-center gap-2"><Lock size={11} className="text-emerald-400/60" /> API key saved</span>
+            <button onClick={() => setKeyEditing(true)} className="text-stone-400 hover:text-amber-300 underline">change</button>
+          </div>
         )}
 
-        {/* Usage meter — always visible */}
-        {apiKey && <UsageMeter refreshKey={usageRefresh} />}
-
-        {/* Disclaimer */}
-        <div className="flex gap-3 items-start my-6 px-4 py-3 rounded-lg border border-amber-900/40 bg-amber-950/20">
-          <AlertTriangle className="w-4 h-4 text-amber-500 mt-0.5 shrink-0" />
-          <p className="text-[12px] text-amber-200/70 leading-relaxed">
-            <span className="text-amber-300 font-semibold">Research aid, not investment advice.</span>{' '}
-            "Dark data" signals lag real-time pro feeds. AI synthesis can hallucinate. Verify before risking capital.
-          </p>
-        </div>
-
-        {/* Mode + mandate */}
-        <section className="mb-6 p-5 sm:p-6 rounded-2xl border border-stone-800/80 bg-stone-950/40 backdrop-blur">
-          <div className="flex items-center justify-between mb-4">
-            <div className="flex items-center gap-2">
-              <Gauge className="w-4 h-4 text-amber-400/80" />
-              <h2 className="mono text-[10px] tracking-[0.25em] uppercase text-stone-400">Research depth</h2>
-            </div>
-            <span className="mono text-xs text-emerald-400/80">≈ ${cost.toFixed(2)} / run</span>
+        {/* CONTROLS */}
+        <div className="mb-6 p-5 rounded-xl border border-stone-800 bg-stone-950/60">
+          <div className="flex items-center gap-2 mb-3">
+            <Gauge className="w-3.5 h-3.5 text-stone-400" />
+            <span className="mono text-[10px] tracking-[0.2em] uppercase text-stone-400">Scan Depth</span>
           </div>
-          <div className="grid grid-cols-3 gap-2 mb-6">
+          <div className="grid grid-cols-3 gap-2 mb-4">
             {Object.entries(MODES).map(([key, m]) => {
               const active = mode === key;
               return (
@@ -317,110 +291,115 @@ export default function App() {
             })}
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-5 mb-6">
-            <ControlGroup label="Risk profile" icon={<Shield className="w-3.5 h-3.5" />}>
-              <select value={risk} onChange={(e) => setRisk(e.target.value)} disabled={running} className={selectCls}>
-                <option value="conservative">Conservative</option>
-                <option value="moderate">Moderate</option>
-                <option value="aggressive">Aggressive</option>
-              </select>
-            </ControlGroup>
-            <ControlGroup label="Time horizon" icon={<Clock className="w-3.5 h-3.5" />}>
-              <select value={horizon} onChange={(e) => setHorizon(e.target.value)} disabled={running} className={selectCls}>
-                <option value="intraday">Intraday (1-2 days)</option>
-                <option value="swing">Swing (3-10 days)</option>
-                <option value="position">Position (2-8 weeks)</option>
-              </select>
-            </ControlGroup>
-            <ControlGroup label="Account size (USD)" icon={<DollarSign className="w-3.5 h-3.5" />}>
-              <input type="number" value={accountSize} onChange={(e) => setAccountSize(e.target.value)}
-                     disabled={running} placeholder="25000" className={selectCls} />
-            </ControlGroup>
+          {/* TIER */}
+          <div className="mb-6 p-3 rounded-lg border border-amber-900/30 bg-amber-950/10">
+            <div className="flex items-center gap-2 mb-2">
+              <Zap className="w-3.5 h-3.5 text-amber-400/80" />
+              <span className="mono text-[10px] tracking-[0.2em] uppercase text-stone-400">API Tier</span>
+              <a href="https://console.anthropic.com/settings/limits" target="_blank" rel="noreferrer"
+                 className="text-[10px] text-stone-500 underline hover:text-amber-300 ml-auto">Check your tier →</a>
+            </div>
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
+              {Object.entries(TIERS).map(([key, t]) => {
+                const active = tier === key;
+                return (
+                  <button key={key} onClick={() => setTier(key)} disabled={running}
+                          className={`text-left p-2 rounded border transition disabled:opacity-50 ${
+                            active ? 'border-amber-400/60 bg-amber-500/10'
+                                   : 'border-stone-800 bg-stone-900/40 hover:border-stone-700'
+                          }`}>
+                    <div className={`text-[11px] font-medium ${active ? 'text-amber-200' : 'text-stone-300'}`}>{t.label}</div>
+                    <div className="text-[9px] text-stone-500 leading-snug mt-0.5">{t.description}</div>
+                  </button>
+                );
+              })}
+            </div>
+            <div className="text-[10px] text-stone-500 mt-2">
+              New API accounts → leave on Tier 1. Bump up once you've spent &gt;$40 to use higher concurrency.
+            </div>
           </div>
 
-          <div>
-            <div className="flex items-center justify-between mb-3">
-              <label className="flex items-center gap-1.5 mono text-[10px] tracking-[0.2em] uppercase text-stone-500">
-                <Layers className="w-3.5 h-3.5 text-amber-500/70" />
-                Sectors ({selectedInd.length} of {INDUSTRIES.length})
-              </label>
-              <div className="flex gap-3 mono text-[10px] uppercase tracking-wider">
-                <button onClick={() => setSelectedInd(INDUSTRIES.map((i) => i.id))} disabled={running}
-                        className="text-stone-500 hover:text-amber-300 transition disabled:opacity-50">all</button>
-                <span className="text-stone-700">·</span>
-                <button onClick={() => setSelectedInd([])} disabled={running}
-                        className="text-stone-500 hover:text-rose-300 transition disabled:opacity-50">none</button>
-              </div>
+          {/* SECTORS */}
+          <div className="mb-2">
+            <div className="flex items-center gap-2 mb-2">
+              <span className="mono text-[10px] tracking-[0.2em] uppercase text-stone-400">Sectors ({selectedInd.length} of {INDUSTRIES.length})</span>
             </div>
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+            <div className="flex flex-wrap gap-1.5">
               {INDUSTRIES.map((ind) => {
                 const active = selectedInd.includes(ind.id);
                 return (
-                  <button key={ind.id} onClick={() => toggleIndustry(ind.id)} disabled={running}
-                          className={`text-left px-3 py-2 rounded-lg border text-xs transition disabled:opacity-50 flex items-center gap-2 ${
-                            active ? 'bg-stone-900/80 border-stone-700/80'
-                                   : 'bg-stone-950/40 border-stone-800/40 opacity-50 hover:opacity-80'
-                          }`}>
-                    <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: active ? ind.color : '#3a3530' }} />
-                    <span className={active ? 'text-stone-200' : 'text-stone-500 line-through decoration-stone-700'}>
-                      {ind.label}
-                    </span>
+                  <button
+                    key={ind.id}
+                    onClick={() => toggleIndustry(ind.id)}
+                    disabled={running}
+                    className={`text-xs px-2.5 py-1 rounded-md border transition disabled:opacity-50 ${
+                      active ? 'bg-amber-400/15 border-amber-400/40 text-amber-200' : 'bg-stone-900/40 border-stone-800 text-stone-400 hover:border-stone-700'
+                    }`}
+                  >
+                    {ind.short}
                   </button>
                 );
               })}
             </div>
           </div>
-        </section>
+        </div>
 
-        <button onClick={() => runAgent(false)} disabled={running || !apiKey || activeIndustries.length === 0}
-                className="w-full group relative overflow-hidden rounded-lg py-4 px-6 font-semibold text-stone-950 transition-all disabled:cursor-not-allowed disabled:opacity-50 mb-2"
-                style={{
-                  background: running ? '#3a3530' : 'linear-gradient(180deg, #f5e6c8 0%, #d4a574 100%)',
-                  boxShadow: running ? 'none' : '0 0 40px rgba(212, 165, 116, 0.25), inset 0 1px 0 rgba(255,255,255,0.4)',
-                }}>
-          <span className="relative z-10 flex items-center justify-center gap-2">
-            {running ? (
-              <>
-                <Loader2 className="w-4 h-4 animate-spin" style={{ color: '#d4a574' }} />
-                <span className="text-stone-300 mono text-sm tracking-wider">
-                  {regime ? `Researching ${activeIndustries.length} sector${activeIndustries.length > 1 ? 's' : ''} · ${completedCount}/${activeIndustries.length} done`
-                          : 'Reading market regime…'}
-                </span>
-              </>
-            ) : (
-              <>
-                <Sparkles className="w-4 h-4" />
-                <span className="tracking-wide">{hasResults ? 'RUN AGAIN' : 'DEPLOY AGENT'}</span>
-                <span className="mono text-xs opacity-70 ml-1">≈ ${cost.toFixed(2)}</span>
-                <ArrowUpRight className="w-4 h-4 group-hover:translate-x-0.5 group-hover:-translate-y-0.5 transition-transform" />
-              </>
-            )}
+        {/* COST + DEPLOY */}
+        <div className="mb-6 flex items-center justify-between text-xs text-stone-500">
+          <span className="flex items-center gap-1.5">
+            <DollarSign size={11} />
+            Est cost: <span className="mono text-amber-300/80">${cost.toFixed(2)}</span>
+            <span className="text-stone-600">· {1 + activeIndustries.length} API calls · 10 picks/sector</span>
           </span>
+        </div>
+
+        <button
+          onClick={() => runAgent(false)}
+          disabled={running || !apiKey}
+          className="w-full py-4 rounded-xl bg-gradient-to-r from-amber-500 to-amber-400 text-stone-950 font-medium hover:from-amber-400 hover:to-amber-300 disabled:opacity-40 disabled:cursor-not-allowed transition flex items-center justify-center gap-2"
+        >
+          {running ? (
+            <><Loader2 size={16} className="animate-spin" /> Running value scan...</>
+          ) : (
+            <span className="tracking-wide">{hasResults ? 'RUN AGAIN' : 'DEPLOY AGENT'}</span>
+          )}
         </button>
 
         {regimeFromCache && hasResults && (
           <button onClick={() => runAgent(true)} disabled={running}
-                  className="w-full mb-6 text-xs text-stone-500 hover:text-amber-300 transition py-1 mono tracking-wider uppercase">
-            ↻ refresh market regime (cached, &lt;5min old)
+                  className="w-full mt-2 mb-6 text-xs text-stone-500 hover:text-amber-300 transition py-1 mono tracking-wider uppercase">
+            ↻ refresh market valuation (cached, &lt;5min old)
           </button>
         )}
 
+        {/* ERRORS */}
         {!apiKey && !keyEditing && (
           <p className="my-3 text-center text-xs text-amber-400/80">Add your Anthropic API key above.</p>
         )}
-
-        {/* Fatal error banner — credit/auth */}
         {fatalError && (
-          <ApiError error={fatalError} onRetry={() => runAgent(true)} contextLabel="The agent stopped" />
+          <div className="mt-6">
+            <ApiError error={fatalError} onRetry={() => runAgent(true)} contextLabel="The agent stopped" />
+          </div>
+        )}
+        {regimeError && !fatalError && (
+          <div className="mt-6">
+            <ApiError error={regimeError} onRetry={() => runAgent(true)} contextLabel="Market valuation scan failed" />
+          </div>
         )}
 
-        {/* Non-fatal regime error */}
-        {regimeError && !fatalError && (
-          <ApiError error={regimeError} onRetry={() => runAgent(true)} contextLabel="Market briefing failed" />
+        {/* QUEUE STATUS */}
+        {running && activeQueue && (
+          <div className="mt-6">
+            <QueueStatus
+              queue={activeQueue}
+              totalExpected={activeIndustries.length + 1}
+              label={`${TIERS[tier]?.label || 'Tier 1'} · ${TIERS[tier]?.description || ''}`}
+            />
+          </div>
         )}
 
         {running && (
-          <div className="mb-6 grid gap-1.5" style={{ gridTemplateColumns: `repeat(${activeIndustries.length}, minmax(0, 1fr))` }}>
+          <div className="mt-6 mb-6 grid gap-1.5" style={{ gridTemplateColumns: `repeat(${activeIndustries.length}, minmax(0, 1fr))` }}>
             {activeIndustries.map((ind) => {
               const s = industryData[ind.id]?.status;
               return (
@@ -428,7 +407,6 @@ export default function App() {
                   <div className="h-full transition-all" style={{
                     width: s === 'done' ? '100%' : s === 'loading' ? '60%' : s === 'error' ? '100%' : '0%',
                     background: s === 'done' ? '#34d399' : s === 'loading' ? ind.color : s === 'error' ? '#f87171' : 'transparent',
-                    animation: s === 'loading' ? 'pulseGlow 1.5s ease-in-out infinite' : 'none',
                   }} />
                 </div>
               );
@@ -436,146 +414,72 @@ export default function App() {
           </div>
         )}
 
-        {regime && <RegimeCard regime={regime} fromCache={regimeFromCache} />}
-
+        {/* RESULTS */}
         {hasResults && (
-          <>
-            <div className="my-8 flex items-center justify-between gap-3 flex-wrap">
-              <div className="flex p-1 rounded-xl border border-stone-800 bg-stone-950/60 flex-wrap">
-                <ViewTab active={view === 'movers'} onClick={() => setView('movers')}
-                         icon={<Flame className="w-3.5 h-3.5" />} label="Daily Movers" />
-                <ViewTab active={view === 'research'} onClick={() => setView('research')}
-                         icon={<Target className="w-3.5 h-3.5" />} label="Research" />
-                <ViewTab active={view === 'signals'} onClick={() => setView('signals')}
-                         icon={<Eye className="w-3.5 h-3.5" />} label="Dark signals" />
-                <ViewTab active={view === 'news'} onClick={() => setView('news')}
-                         icon={<Newspaper className="w-3.5 h-3.5" />} label="News pulse" />
-                <ViewTab active={view === 'dashboard'} onClick={() => setView('dashboard')}
-                         icon={<LayoutDashboard className="w-3.5 h-3.5" />} label="Overview" />
-                <ViewTab active={view === 'industries'} onClick={() => setView('industries')}
-                         icon={<ListTree className="w-3.5 h-3.5" />} label="By sector" />
-              </div>
-              <div className="text-xs text-stone-500">
-                {moversLoading && '50 movers loading · '}
-                {loadingCount > 0 && `${loadingCount} sectors loading · `}
-                {errorCount > 0 && `${errorCount} failed · `}
-                {completedCount > 0 && `${completedCount}/${activeIndustries.length} sectors`}
-              </div>
-            </div>
+          <div className="mt-8">
+            {regime && <RegimeCard regime={regime} fromCache={regimeFromCache} />}
 
-            {/* Watchlist always shown */}
-            <div className="mb-6">
-              <WatchlistPanel
-                watchlist={watchlist}
-                onTickerClick={(t) => setDeepDiveTicker(t)}
-                onRemove={(t) => toggleWatch(t)}
-                onSearch={(t) => setDeepDiveTicker(t)}
-              />
-            </div>
-
-            {/* DAILY MOVERS — Top 50 today */}
-            {view === 'movers' && (
-              <div className="space-y-6">
-                {moversLoading && !movers && !moversError && (
-                  <div className="bg-white/5 border border-white/10 rounded-xl p-12 text-center">
-                    <Loader2 className="w-6 h-6 text-amber-300 animate-spin mx-auto mb-3" />
-                    <div className="text-sm text-white/60">Scanning the market for today's top 50 movers...</div>
-                    <div className="text-xs text-white/40 mt-1">Gainers · Losers · Unusual volume · News catalysts</div>
+            {completedCount > 0 && (
+              <>
+                <div className="my-6 flex items-center justify-between gap-3 flex-wrap">
+                  <div className="flex p-1 rounded-xl border border-stone-800 bg-stone-950/60 flex-wrap">
+                    <ViewTab active={view === 'top'} onClick={() => setView('top')}
+                             icon={<Target className="w-3.5 h-3.5" />} label="Top Picks" />
+                    <ViewTab active={view === 'dashboard'} onClick={() => setView('dashboard')}
+                             icon={<LayoutDashboard className="w-3.5 h-3.5" />} label="Dashboard" />
+                    <ViewTab active={view === 'industries'} onClick={() => setView('industries')}
+                             icon={<ListTree className="w-3.5 h-3.5" />} label="By Sector" />
                   </div>
-                )}
-                {moversError && (
-                  <ApiError error={moversError} contextLabel="Daily movers scan failed" onRetry={() => {
-                    setMoversError(null);
-                    setMoversLoading(true);
-                    fetchDailyMovers(apiKey, { mode })
-                      .then(({ data, usage }) => { recordUsageAndRefresh(usage, mode, 'movers'); setMovers(data); })
-                      .catch((err) => setMoversError(err))
-                      .finally(() => setMoversLoading(false));
-                  }} />
-                )}
-                {movers && (
-                  <>
-                    <DailyMovers
-                      data={movers}
-                      onTickerClick={(t) => setDeepDiveTicker(t)}
-                      watchlist={watchlist}
-                      onToggleWatch={toggleWatch}
-                    />
-                    <MarketHeatmap data={movers} onTickerClick={(t) => setDeepDiveTicker(t)} />
-                  </>
-                )}
-              </div>
-            )}
-
-            {/* RESEARCH — High-potential picks across sectors */}
-            {view === 'research' && (
-              <div className="space-y-6">
-                {completedCount === 0 ? (
-                  <div className="bg-white/5 border border-white/10 rounded-xl p-12 text-center">
-                    <Loader2 className="w-6 h-6 text-amber-300 animate-spin mx-auto mb-3" />
-                    <div className="text-sm text-white/60">Running sector specialists...</div>
-                    <div className="text-xs text-white/40 mt-1">{loadingCount} of {activeIndustries.length} working</div>
+                  <div className="text-xs text-stone-500">
+                    {loadingCount > 0 && `${loadingCount} loading · `}
+                    {errorCount > 0 && `${errorCount} failed · `}
+                    {completedCount} of {activeIndustries.length} sectors
                   </div>
-                ) : (
+                </div>
+
+                {/* Watchlist always shown */}
+                <div className="mb-6">
+                  <WatchlistPanel
+                    watchlist={watchlist}
+                    onTickerClick={(t) => setDeepDiveTicker(t)}
+                    onRemove={(t) => toggleWatch(t)}
+                    onSearch={(t) => setDeepDiveTicker(t)}
+                  />
+                </div>
+
+                {view === 'top' && (
                   <Top10Panel
                     picks={agg.topConviction}
+                    limit={15}
                     watchlist={watchlist}
                     onTickerClick={(t) => setDeepDiveTicker(t)}
                     onToggleWatch={toggleWatch}
                   />
                 )}
-              </div>
-            )}
 
-            {view === 'signals' && (
-              <DarkSignalsLeaderboard
-                items={darkSignals}
-                onTickerClick={(t) => setDeepDiveTicker(t)}
-              />
-            )}
+                {view === 'dashboard' && (
+                  <Dashboard aggregate={agg} onSectorClick={scrollToSector} />
+                )}
 
-            {view === 'news' && (
-              <>
-                {newsPulse ? (
-                  <NewsPulse data={newsPulse} onTickerClick={(t) => setDeepDiveTicker(t)} />
-                ) : newsPulseError ? (
-                  <ApiError error={newsPulseError} contextLabel="News pulse failed" onRetry={() => {
-                    setNewsPulseError(null);
-                    fetchNewsPulse(apiKey, { mode })
-                      .then(({ data, usage }) => {
-                        recordUsageAndRefresh(usage, mode, 'news');
-                        setNewsPulse(data);
-                      })
-                      .catch((err) => setNewsPulseError(err));
-                  }} />
-                ) : (
-                  <div className="bg-white/5 border border-white/10 rounded-xl p-6 text-center text-white/50">
-                    <Loader2 className="w-5 h-5 animate-spin inline-block text-amber-300" />
-                    <div className="mt-2 text-sm">Loading news pulse...</div>
+                {view === 'industries' && (
+                  <div className="space-y-6">
+                    {activeIndustries.map((ind) => (
+                      <IndustrySection
+                        key={ind.id}
+                        sectionId={`sector-${ind.id}`}
+                        industry={ind}
+                        state={industryData[ind.id] || { status: 'pending' }}
+                        onRetry={() => retryIndustry(ind.id)}
+                        onTickerClick={(t) => setDeepDiveTicker(t)}
+                        watchlist={watchlist}
+                        onToggleWatch={toggleWatch}
+                      />
+                    ))}
                   </div>
                 )}
               </>
             )}
-
-            {view === 'dashboard' && completedCount > 0 && (
-              <Dashboard aggregate={agg} regime={regime} onSectorClick={scrollToSector} />
-            )}
-
-            {view === 'industries' && (
-              <div className="space-y-6">
-                {activeIndustries.map((ind) => (
-                  <IndustrySection
-                    key={ind.id}
-                    sectionId={`sector-${ind.id}`}
-                    industry={ind}
-                    state={industryData[ind.id] || { status: 'pending' }}
-                    accountSize={accountNum}
-                    onRetry={() => retryIndustry(ind.id)}
-                  />
-                ))}
-              </div>
-            )}
-          </>
+          </div>
         )}
 
         {!hasResults && !running && apiKey && (
@@ -585,7 +489,7 @@ export default function App() {
                 <Eye className="w-6 h-6 text-stone-600" />
               </div>
               <p className="text-stone-500 max-w-md mx-auto">
-                Configure your mandate and deploy. Cached regime keeps repeat runs cheap (~5 min TTL).
+                Pick sectors and deploy. Each sector returns 10 undervalued stocks scored on Valuation · Growth · SEC Insider · Volume.
               </p>
             </div>
             <div className="max-w-md mx-auto">
@@ -602,14 +506,15 @@ export default function App() {
         {hasResults && (
           <div className="mt-16 pt-8 border-t border-stone-900 text-[11px] text-stone-600 leading-relaxed mono tracking-wide">
             <p>
-              Synthesized by Anthropic API ({MODES[mode].model}). Data may be stale or wrong. Backtest before risking capital.
-              None of this is investment advice.
+              V-Stock surfaces undervalued candidates using fundamental data the model retrieves via web search. P/E, growth rates,
+              and insider counts can be wrong or stale — always verify against SEC filings, the company's 10-K/10-Q, and your broker
+              before risking capital. Not investment advice.
             </p>
           </div>
         )}
       </div>
 
-      {/* Deep dive modal — top level so it can overlay everything */}
+      {/* Deep dive modal */}
       {deepDiveTicker && (
         <TickerDeepDive
           ticker={deepDiveTicker}
@@ -623,74 +528,15 @@ export default function App() {
   );
 }
 
-const selectCls = 'w-full bg-stone-900/60 border border-stone-700/60 rounded-lg px-3.5 py-2.5 text-stone-100 text-sm focus:border-amber-500/60 focus:outline-none transition disabled:opacity-50';
-
-function ControlGroup({ label, icon, children }) {
-  return (
-    <div>
-      <label className="flex items-center gap-1.5 mb-2 mono text-[10px] tracking-[0.2em] uppercase text-stone-500">
-        <span className="text-amber-500/70">{icon}</span>{label}
-      </label>
-      {children}
-    </div>
-  );
-}
-
 function ViewTab({ active, onClick, icon, label }) {
   return (
-    <button onClick={onClick}
-            className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs mono uppercase tracking-wider transition ${
-              active ? 'bg-amber-400 text-stone-950 font-semibold' : 'text-stone-400 hover:text-stone-200'
-            }`}>
+    <button
+      onClick={onClick}
+      className={`flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg transition ${
+        active ? 'bg-amber-400/20 text-amber-200' : 'text-stone-400 hover:text-stone-200 hover:bg-stone-900/60'
+      }`}
+    >
       {icon}{label}
     </button>
-  );
-}
-
-function KeyGate({ keyInput, setKeyInput, onSave, onCancel }) {
-  return (
-    <section className="mb-8 p-6 sm:p-7 rounded-2xl border border-amber-900/30 bg-gradient-to-br from-amber-950/20 to-stone-950/40">
-      <div className="flex items-center gap-2 mb-3">
-        <Key className="w-4 h-4 text-amber-400" />
-        <h2 className="display text-xl text-stone-100">Anthropic API key</h2>
-      </div>
-      <p className="text-sm text-stone-400 mb-4 leading-relaxed">
-        Stored only in your browser. Get one at{' '}
-        <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noreferrer"
-           className="text-amber-300 underline hover:text-amber-200">console.anthropic.com</a>.
-      </p>
-      <div className="flex gap-2">
-        <input type="password" value={keyInput} onChange={(e) => setKeyInput(e.target.value)}
-               onKeyDown={(e) => e.key === 'Enter' && onSave()} placeholder="sk-ant-..." autoFocus
-               className="flex-1 bg-stone-900/60 border border-stone-700/60 rounded-lg px-3.5 py-2.5 mono text-sm text-stone-100 focus:border-amber-500/60 focus:outline-none" />
-        <button onClick={onSave} disabled={!keyInput.trim()}
-                className="px-5 rounded-lg bg-amber-400 hover:bg-amber-300 disabled:opacity-40 disabled:cursor-not-allowed text-stone-950 font-semibold text-sm transition">
-          Save
-        </button>
-        {onCancel && (
-          <button onClick={onCancel} className="px-4 rounded-lg border border-stone-700 text-stone-300 hover:bg-stone-800 text-sm transition">
-            Cancel
-          </button>
-        )}
-      </div>
-    </section>
-  );
-}
-
-function KeyStatus({ apiKey, onEdit, onClear }) {
-  const masked = apiKey.slice(0, 10) + '…' + apiKey.slice(-4);
-  return (
-    <div className="mb-4 flex items-center justify-between gap-3 px-4 py-2.5 rounded-lg border border-stone-800/70 bg-stone-950/40">
-      <div className="flex items-center gap-2 min-w-0">
-        <Lock className="w-3.5 h-3.5 text-emerald-400/80 shrink-0" />
-        <span className="mono text-xs text-stone-400 truncate">{masked}</span>
-        <span className="text-[10px] mono uppercase tracking-wider text-emerald-400/80">connected</span>
-      </div>
-      <div className="flex gap-2 shrink-0">
-        <button onClick={onEdit} className="text-xs text-stone-400 hover:text-amber-300 transition">change</button>
-        <span className="text-stone-700">·</span>
-        <button onClick={onClear} className="text-xs text-stone-400 hover:text-rose-300 transition">clear</button>
-      </div>
-    </div>
   );
 }

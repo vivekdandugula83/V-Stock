@@ -40,18 +40,96 @@ export const MODES = {
   },
 };
 
+// Preferred source priority for web_search grounding.
+// The model is directed to prefer these sources for higher reliability,
+// and to include the actual URLs it relied on in every response.
+export const PREFERRED_SOURCES = {
+  primary: [
+    { domain: 'sec.gov',                  use: 'SEC EDGAR — 10-K, 10-Q, Form 4 insider, 13F institutional' },
+    { domain: 'investor relations pages', use: 'Company IR — earnings transcripts, investor decks' },
+  ],
+  news: [
+    { domain: 'reuters.com',     use: 'Financial news' },
+    { domain: 'bloomberg.com',   use: 'Markets, M&A' },
+    { domain: 'wsj.com',         use: 'Wall Street Journal' },
+    { domain: 'ft.com',          use: 'Financial Times' },
+    { domain: 'barrons.com',     use: "Barron's" },
+  ],
+  fundamentals: [
+    { domain: 'stockanalysis.com',  use: 'Historical financials, 5yr CAGR' },
+    { domain: 'macrotrends.net',    use: 'Long-term historical data' },
+    { domain: 'finviz.com',         use: 'Valuation comps, sector screener' },
+    { domain: 'simplywall.st',      use: 'Financial summaries' },
+  ],
+  insider: [
+    { domain: 'openinsider.com', use: 'SEC Form 4 aggregation, cluster buys' },
+    { domain: 'finviz.com/insidertrading.ashx', use: 'Insider rollups' },
+  ],
+  institutional: [
+    { domain: 'whalewisdom.com', use: '13F institutional holdings tracking' },
+    { domain: 'dataroma.com',    use: 'Super-investor 13F holdings' },
+    { domain: 'hedgefollow.com', use: 'Hedge fund positions' },
+  ],
+  darkPoolFlow: [
+    { domain: 'chartexchange.com',   use: 'Dark pool prints, ATS data' },
+    { domain: 'squeezemetrics.com',  use: 'DIX, GEX, dark pool indicators' },
+    { domain: 'unusualwhales.com',   use: 'Options flow, dark pool sentiment' },
+    { domain: 'ortex.com',           use: 'Short interest, days-to-cover' },
+  ],
+  fallback: [
+    { domain: 'finance.yahoo.com', use: 'Price, volume, basic metrics' },
+    { domain: 'google.com/finance', use: 'Quick quotes' },
+  ],
+  avoid: [
+    'reddit.com', 'twitter.com', 'x.com', 'seekingalpha.com (paywall, lower quality)',
+    'low-quality SEO content farms', 'forums', 'opinion posts from non-credentialed sources',
+  ],
+};
+
+// Source priority text injected into prompts
+const SOURCE_GUIDANCE = `
+SOURCE PRIORITY (use these in this order for the highest reliability):
+
+PRIMARY — always prefer:
+- SEC EDGAR (sec.gov/edgar) for 10-K, 10-Q, Form 4 (insider transactions), 13F (institutional holdings), 13D/G
+- Company investor relations pages for earnings transcripts and decks
+
+NEWS (reputable):
+- Reuters, Bloomberg, WSJ, FT, Barron's
+
+FUNDAMENTALS aggregators:
+- stockanalysis.com, macrotrends.net for historical financials and 5-year CAGR
+- finviz.com for valuation comps
+
+INSIDER ACTIVITY:
+- openinsider.com (SEC Form 4 aggregation, cluster buys are most predictive)
+- finviz.com/insidertrading.ashx
+
+INSTITUTIONAL POSITIONING:
+- whalewisdom.com, dataroma.com, hedgefollow.com for 13F filings
+
+DARK POOL / SMART MONEY FLOW (when available):
+- chartexchange.com, squeezemetrics.com for dark pool prints and DIX/GEX
+- unusualwhales.com for options flow and dark pool sentiment
+- ortex.com for short interest and days-to-cover
+
+FALLBACK only:
+- Yahoo Finance, Google Finance for current price/volume
+
+AVOID: Reddit, Twitter/X, low-quality SEO content, forums, paywalled aggregators without primary data.
+
+For EVERY pick, include a "sources" array with 3-6 actual URLs you used. Cite primary sources when possible.
+`;
+
 export function estimateCost(modeKey, industryCount) {
   const m = MODES[modeKey];
   if (!m) return 0;
-  // Calls: 1 regime + 1 news pulse + 1 movers + N sectors
-  const totalCalls = 3 + industryCount;
-  // Searches: regime + news + movers (regimeSearches each) + sectors
-  const totalSearches = (m.regimeSearches * 3) + (industryCount * m.industrySearches);
+  // Calls: 1 regime + N sector specialists
+  const totalCalls = 1 + industryCount;
+  const totalSearches = m.regimeSearches + (industryCount * m.industrySearches);
   const searchCost = totalSearches * 0.01;
-  // Movers call has bigger output (~1.5x industry tokens)
-  const moversTokens = m.industryTokens * 1.5;
   const avgInputPerCall = 3500 + (m.industrySearches * 4500);
-  const avgOutputPerCall = ((m.industryTokens * industryCount) + m.regimeTokens * 2 + moversTokens) / totalCalls / 2;
+  const avgOutputPerCall = ((m.industryTokens * industryCount) + m.regimeTokens) / totalCalls / 2;
   const inputCost = (totalCalls * avgInputPerCall * m.inputPer1M) / 1_000_000;
   const outputCost = (totalCalls * avgOutputPerCall * m.outputPer1M) / 1_000_000;
   return searchCost + inputCost + outputCost;
@@ -143,7 +221,14 @@ async function callClaude(apiKey, prompt, mode, maxTokens, maxUses) {
     try { parsedBody = JSON.parse(bodyText); } catch {}
     const message = parsedBody?.error?.message || bodyText.slice(0, 300);
     const kind = classifyError(res.status, message);
-    throw new ApiError(kind, message, { status: res.status, body: bodyText });
+    // Capture retry-after header for the queue to honor
+    const retryAfterHeader = res.headers.get('retry-after');
+    const retryAfterMs = retryAfterHeader ? parseInt(retryAfterHeader, 10) * 1000 : null;
+    throw new ApiError(kind, message, {
+      status: res.status,
+      body: bodyText,
+      retryAfter: Number.isFinite(retryAfterMs) ? retryAfterMs : null,
+    });
   }
 
   let data;
@@ -181,72 +266,158 @@ async function callClaude(apiKey, prompt, mode, maxTokens, maxUses) {
 }
 
 // Defensive normalizer — guarantees every pick has the fields the UI expects
+// Composite scoring weights (V-Stock value model)
+export const SCORE_WEIGHTS = {
+  valuation: 0.40,
+  growth: 0.30,
+  insider: 0.15,
+  volume: 0.15,
+};
+
+export function computeCompositeScore(pick) {
+  const v = pick?.valuation?.score || 0;
+  const g = pick?.growth?.score || 0;
+  const i = pick?.insiderActivity?.score || 0;
+  const vol = pick?.volume?.score || 0;
+  const composite = v * SCORE_WEIGHTS.valuation
+                  + g * SCORE_WEIGHTS.growth
+                  + i * SCORE_WEIGHTS.insider
+                  + vol * SCORE_WEIGHTS.volume;
+  return Math.round(Math.max(0, Math.min(100, composite)));
+}
+
+export function verdictFor(score) {
+  const s = Number(score) || 0;
+  if (s >= 80) return 'Deep Value';
+  if (s >= 65) return 'Undervalued';
+  if (s >= 50) return 'Fair Value';
+  return 'Overvalued';
+}
+
 function normalizePicks(rawPicks) {
   if (!Array.isArray(rawPicks)) return [];
-  return rawPicks.map((p, i) => ({
-    rank: p?.rank ?? (i + 1),
-    ticker: p?.ticker || '?',
-    company: p?.company || '',
-    subIndustry: p?.subIndustry || '',
-    currentPrice: typeof p?.currentPrice === 'number' ? p.currentPrice : null,
-    score: typeof p?.score === 'number' ? Math.max(0, Math.min(100, p.score)) : 0,
-    action: p?.action || 'Watch',
-    conviction: p?.conviction || 'Low',
-    thesis: p?.thesis || '',
-    edge: p?.edge || '',
-    earnings: p?.earnings || null,
-    technicals: p?.technicals || null,
-    tradePlan: p?.tradePlan || null,
-    volatility: p?.volatility || null,
-    smartMoney: p?.smartMoney || null,
-    nextDayForecast: p?.nextDayForecast || null,
-    priceHistory: Array.isArray(p?.priceHistory)
-      ? p.priceHistory.filter((n) => typeof n === 'number' && !isNaN(n))
-      : [],
-    catalysts: Array.isArray(p?.catalysts) ? p.catalysts : [],
-    risks: Array.isArray(p?.risks) ? p.risks : [],
-  }));
+  return rawPicks
+    .map((p, i) => {
+      const valuation = {
+        pe: p?.valuation?.pe ?? null,
+        forwardPe: p?.valuation?.forwardPe ?? null,
+        peg: p?.valuation?.peg ?? null,
+        priceBook: p?.valuation?.priceBook ?? null,
+        evToEbitda: p?.valuation?.evToEbitda ?? null,
+        vsSectorMedian: p?.valuation?.vsSectorMedian || null,
+        score: clampScore(p?.valuation?.score),
+      };
+      const growth = {
+        revenueGrowthYoY: p?.growth?.revenueGrowthYoY || null,
+        revenue5yrCagr: p?.growth?.revenue5yrCagr || null,
+        epsGrowthYoY: p?.growth?.epsGrowthYoY || null,
+        eps5yrCagr: p?.growth?.eps5yrCagr || null,
+        operatingMargin: p?.growth?.operatingMargin || null,
+        netMargin: p?.growth?.netMargin || null,
+        roe: p?.growth?.roe || null,
+        score: clampScore(p?.growth?.score),
+      };
+      const insiderActivity = {
+        last6moDirection: p?.insiderActivity?.last6moDirection || 'No activity',
+        totalBuys: Number(p?.insiderActivity?.totalBuys) || 0,
+        totalSells: Number(p?.insiderActivity?.totalSells) || 0,
+        totalBuyValue: p?.insiderActivity?.totalBuyValue || null,
+        totalSellValue: p?.insiderActivity?.totalSellValue || null,
+        largestBuy: p?.insiderActivity?.largestBuy || null,
+        notableNames: Array.isArray(p?.insiderActivity?.notableNames) ? p.insiderActivity.notableNames : [],
+        score: clampScore(p?.insiderActivity?.score),
+      };
+      const volume = {
+        avgDaily20d: p?.volume?.avgDaily20d || null,
+        currentVsAvg: p?.volume?.currentVsAvg || null,
+        trend: p?.volume?.trend || 'flat',
+        liquidityGrade: p?.volume?.liquidityGrade || 'C',
+        score: clampScore(p?.volume?.score),
+      };
+      const institutional = p?.institutional ? {
+        darkPoolSentiment: p.institutional.darkPoolSentiment || 'Unknown',
+        institutionalFlow: p.institutional.institutionalFlow || 'Unknown',
+        notable13fChanges: p.institutional.notable13fChanges || null,
+        shortInterest: p.institutional.shortInterest || null,
+        optionsFlow: p.institutional.optionsFlow || null,
+        topHolders: Array.isArray(p.institutional.topHolders) ? p.institutional.topHolders : [],
+        dataAvailability: p.institutional.dataAvailability || 'Limited',
+      } : null;
+      const sources = Array.isArray(p?.sources)
+        ? p.sources.filter((s) => typeof s === 'string' && s.startsWith('http')).slice(0, 8)
+        : [];
+      const catalysts = Array.isArray(p?.catalysts) ? p.catalysts.slice(0, 5) : [];
+      const normalized = {
+        rank: p?.rank ?? (i + 1),
+        ticker: p?.ticker || '?',
+        company: p?.company || '',
+        subIndustry: p?.subIndustry || '',
+        currentPrice: typeof p?.currentPrice === 'number' ? p.currentPrice : null,
+        marketCap: p?.marketCap || null,
+        valuation,
+        growth,
+        insiderActivity,
+        volume,
+        institutional,
+        thesis: p?.thesis || '',
+        catalysts,
+        risks: Array.isArray(p?.risks) ? p.risks : [],
+        sources,
+        priceHistory: Array.isArray(p?.priceHistory)
+          ? p.priceHistory.filter((n) => typeof n === 'number' && !isNaN(n))
+          : [],
+      };
+      // Use model's compositeScore if it looks reasonable, else compute client-side
+      const modelComposite = clampScore(p?.compositeScore);
+      const computed = computeCompositeScore(normalized);
+      normalized.compositeScore = modelComposite > 0 ? modelComposite : computed;
+      normalized.verdict = p?.verdict || verdictFor(normalized.compositeScore);
+      return normalized;
+    })
+    .sort((a, b) => (b.compositeScore || 0) - (a.compositeScore || 0))
+    .map((p, i) => ({ ...p, rank: i + 1 }));
+}
+
+function clampScore(n) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return 0;
+  return Math.max(0, Math.min(100, Math.round(x)));
 }
 
 export async function fetchMarketRegime(apiKey, { horizon, risk, mode }) {
   const m = MODES[mode];
   const today = new Date().toDateString();
-  const prompt = `You are a Wall Street market strategist. Today is ${today}.
+  const prompt = `You are a value-investing market strategist. Today is ${today}.
 
-Use web_search (max ${m.regimeSearches}) for CURRENT data:
-- US indices (SPX, NDX, RUT) levels and day/week change
-- VIX level and trend
-- 10-year yield, DXY
-- This week's earnings + econ calendar
-- Sector rotation: leaders/laggards
-- Smart money signals: notable institutional flow
+Use web_search (max ${m.regimeSearches}) for current market valuation context:
+- S&P 500 trailing P/E and forward P/E (vs 10/20-year averages)
+- Shiller CAPE ratio
+- Sector P/E dispersion — which sectors are cheap vs expensive
+- 10-year Treasury yield (affects equity risk premium)
+- Aggregate insider buying/selling trends across S&P (Form 4 net flow)
+- Current narratives driving over/undervaluation
 
-Synthesize a tactical briefing for a ${risk}-risk trader, ${horizon} horizon.
+${SOURCE_GUIDANCE}
 
 Return ONLY this JSON (no markdown, no preamble):
 {
-  "regime": "Risk-On" | "Risk-Off" | "Mixed" | "Choppy",
-  "regimeReason": "1 sentence why",
-  "indices": {
-    "spx": { "level": "5xxx", "change": "+0.X% today, +X% week" },
-    "ndx": { "level": "1xxxx", "change": "+0.X% today, +X% week" },
-    "rut": { "level": "2xxx", "change": "+0.X% today, +X% week" }
-  },
-  "vix": { "level": "1X.X", "interpretation": "1 sentence" },
-  "rates": { "ten_year": "X.XX%", "dollar": "DXY at XXX, trend", "implication": "1 sentence" },
-  "thisWeekCatalysts": [
-    { "date": "YYYY-MM-DD", "event": "specific event", "importance": "high|medium|low" }
+  "marketValuation": "Expensive | Fair | Cheap | Mixed",
+  "valuationReason": "2-3 sentences with concrete numbers",
+  "spxPe": "trailing X.X (X-yr avg Y.Y)",
+  "spxForwardPe": "X.X",
+  "shillerCape": "XX.X (avg XX.X)",
+  "tenYear": "X.XX%",
+  "equityRiskPremium": "X.XX% — narrow | wide | normal",
+  "sectorValuation": [
+    { "sector": "Tech", "pe": "X.X", "vsHistorical": "+X% premium or -X% discount", "rating": "Cheap|Fair|Expensive" }
   ],
-  "sectorRotation": {
-    "leaders": ["sector — why"],
-    "laggards": ["sector — why"]
-  },
-  "smartMoneyPulse": "1-2 sentences on aggregate institutional flow",
-  "tradingPlaybook": "3 sentences: tactical guidance — what to lean into, avoid, key levels",
+  "insiderAggregate": "1 sentence on aggregate insider buy/sell ratio in S&P last 30 days",
+  "valueOpportunities": ["sector or theme — 1 sentence why undervalued"],
+  "sources": ["https://www.sec.gov/...", "https://stockanalysis.com/...", "https://openinsider.com/..."],
   "asOf": "${new Date().toISOString()}"
 }
 
-Real numbers, named events.`;
+Real numbers. Specific sectors. The "sources" array must contain 3-5 actual URLs you used.`;
 
   const { parsed, usage } = await callClaude(apiKey, prompt, mode, m.regimeTokens, m.regimeSearches);
   return { data: parsed, usage };
@@ -258,41 +429,35 @@ export async function fetchIndustryPicks(apiKey, industryId, { horizon, risk, re
   const m = MODES[mode];
   const today = new Date().toDateString();
 
-  const horizonGuidance = {
-    intraday: 'opens-to-close intraday or 1-2 day swing — tight technical setups',
-    swing:    '3-10 trading day swing — earnings setups, breakouts, momentum',
-    position: '2-8 week position — fundamental thesis with technical confirmation',
-  }[horizon] || 'swing trade';
+  const prompt = `You are a fundamental value-investing analyst covering ${ind.label}. Today is ${today}.
 
-  const smartMoneyAsk = {
-    basic: 'Note any obvious analyst upgrade/downgrade or insider pattern.',
-    standard: `Search for institutional signals:
-- Recent insider transactions (Form 4) — buys vs sells
-- Unusual options activity, C/P ratio anomalies
-- Dark pool prints / off-exchange volume if reported
-- Notable 13F changes, ETF flow`,
-    full: `Aggressively pull smart money signals:
-- Insider Form 4 — names, sizes, recency
-- Unusual options activity — strikes, expiries, premium spent
-- Dark pool prints from public aggregators
-- Notable 13F changes from major funds (Berkshire, Renaissance, Citadel)
-- IV rank, expected next-day move`,
-  }[m.smartMoneyDepth];
+Use web_search (max ${m.industrySearches}) to find the TEN most UNDERVALUED stocks in ${ind.label} using fundamental analysis.
 
-  const prompt = `You are a sector specialist covering ${ind.label}. Today is ${today}.
-Current market regime: ${regime || 'unknown'}.
-Trade target: ${horizonGuidance} (${risk} risk).
+${SOURCE_GUIDANCE}
 
-Use web_search (max ${m.industrySearches}) to find TEN highest-quality trade setups in ${ind.label}.
+Focus on:
+- Trailing P/E ratio (lower than sector median preferred, but not value traps)
+- Forward P/E ratio (low forward P/E vs current = market underpricing future earnings)
+- Revenue growth YoY and 5-year revenue CAGR
+- EPS growth YoY and 5-year EPS CAGR
+- Profit margins (operating, net)
+- Insider buying activity from SEC Form 4 filings — last 6 months (CEO/CFO/director purchases are strong signals)
+- Volume — healthy liquidity, accumulation patterns (not falling-knife declines)
+- PEG ratio when growth data available (PEG < 1 = undervalued growth)
+- Institutional / smart money: 13F changes from major funds, dark pool sentiment, short interest, options flow when accessible
 
-For each: earnings (beat/miss, guidance), analyst actions, technical setup, catalysts in next 14 days,
-${smartMoneyAsk}, recent 5-day price trajectory.
+EXCLUDE:
+- Value traps: declining revenue, falling earnings, weakening margins
+- Pre-revenue or chronically negative earnings companies
+- Illiquid micro-caps (< $500M market cap or < 200K daily volume)
+- Pure meme/momentum plays with no fundamental support
 
 Return ONLY this JSON (no markdown, no preamble):
 {
   "industry": "${ind.label}",
-  "industryThesis": "2-3 sentences on this sector",
-  "industrySmartMoney": "1-2 sentences on aggregate institutional positioning",
+  "industryValuation": "2-3 sentences on sector valuation — is the sector cheap or expensive vs history? P/E range?",
+  "sectorMedianPe": 18.5,
+  "industrySources": ["https://...", "https://..."],
   "picks": [
     {
       "rank": 1,
@@ -300,71 +465,99 @@ Return ONLY this JSON (no markdown, no preamble):
       "company": "Full Name",
       "subIndustry": "specific sub-industry",
       "currentPrice": 123.45,
-      "score": 88,
-      "action": "Strong Buy" | "Buy" | "Accumulate" | "Watch",
-      "conviction": "High" | "Medium" | "Low",
-      "thesis": "3-4 sentences with hard data",
-      "edge": "1 sentence — why NOW",
-      "earnings": {
-        "lastDate": "YYYY-MM-DD or N/A",
-        "result": "EPS/Rev result vs est",
-        "guidance": "raised/lowered/maintained",
-        "nextDate": "YYYY-MM-DD"
+      "marketCap": "$XB",
+
+      "valuation": {
+        "pe": 12.4,
+        "forwardPe": 10.8,
+        "peg": 0.9,
+        "priceBook": 2.1,
+        "evToEbitda": 8.5,
+        "vsSectorMedian": "-32%",
+        "score": 85
       },
-      "technicals": {
-        "trend": "trend label",
-        "keyLevels": "support $X, resistance $Y",
-        "pattern": "specific pattern",
-        "rsi": "value",
-        "volume": "above/below average"
+
+      "growth": {
+        "revenueGrowthYoY": "+14%",
+        "revenue5yrCagr": "11.2%",
+        "epsGrowthYoY": "+22%",
+        "eps5yrCagr": "15.0%",
+        "operatingMargin": "22%",
+        "netMargin": "18%",
+        "roe": "16%",
+        "score": 78
       },
-      "tradePlan": {
-        "entry": "$X.XX - $Y.YY",
-        "stop": "$X.XX (% below)",
-        "target1": "$X.XX (% gain)",
-        "target2": "$X.XX (% gain)",
-        "rrRatio": "1:X.X",
-        "positionSize": "X% of trading capital"
+
+      "insiderActivity": {
+        "last6moDirection": "Net buying" | "Net selling" | "Mixed" | "No activity",
+        "totalBuys": 3,
+        "totalSells": 0,
+        "totalBuyValue": "$2.5M",
+        "totalSellValue": "$0",
+        "largestBuy": "CEO John Smith purchased $1.2M on 2025-MM-DD",
+        "notableNames": ["CEO John Smith", "CFO Jane Doe"],
+        "score": 88
       },
-      "volatility": {
-        "iv": "X%", "ivRank": "X (0-100)", "hv30": "X%",
-        "expectedMove": "$X.XX (±X%) for next 1-day",
-        "regime": "low|normal|elevated|extreme"
-      },
-      "smartMoney": {
-        "darkPoolSentiment": "Bullish | Neutral | Bearish",
-        "institutionalFlow": "Net buying | Net selling | Mixed | Unknown",
-        "insiderActivity": "1-2 sentences on Form 4",
-        "optionsFlow": "C/P ratio + unusual activity",
+
+      "volume": {
+        "avgDaily20d": "2.1M shares",
+        "currentVsAvg": "1.33x avg",
+        "trend": "rising" | "flat" | "falling",
+        "liquidityGrade": "A" | "B" | "C" | "D",
         "score": 75
       },
-      "nextDayForecast": {
-        "bias": "Bullish | Neutral | Bearish",
-        "confidence": "High | Medium | Low",
-        "expectedRange": "$X.XX - $Y.YY",
-        "keyLevel": "$X.XX",
-        "rationale": "1 sentence",
-        "gapRisk": "low | medium | high"
+
+      "institutional": {
+        "darkPoolSentiment": "Bullish | Neutral | Bearish | Unknown",
+        "institutionalFlow": "Net buying | Net selling | Mixed | Unknown",
+        "notable13fChanges": "1 sentence on notable fund moves last quarter, or 'No notable changes' / 'No data'",
+        "shortInterest": "X.X% of float, X days to cover (trend: rising/falling/stable)" ,
+        "optionsFlow": "C/P ratio + notable unusual activity, or 'No significant flow'",
+        "dataAvailability": "Strong | Partial | Limited"
       },
-      "priceHistory": [120.40, 121.10, 119.85, 122.20, 123.00, 122.50, 124.10, 125.00, 124.50, 126.00, 125.80, 127.20, 128.00, 127.50, 128.90, 129.50, 130.00, 131.20, 130.80, 132.10],
+
+      "compositeScore": 82,
+      "verdict": "Deep Value" | "Undervalued" | "Fair Value" | "Overvalued",
+
+      "thesis": "3-4 sentences: WHY this is undervalued. What is the market missing? What catalyst could re-rate the valuation? Reference specific numbers.",
+
       "catalysts": [
-        { "date": "YYYY-MM-DD or 'TBD'", "event": "specific", "impact": "high|medium|low" }
+        { "date": "YYYY-MM-DD or 'TBD'", "event": "specific event", "impact": "high|medium|low" }
       ],
-      "risks": ["risk 1", "risk 2"]
+
+      "risks": ["specific risk 1", "specific risk 2", "specific risk 3"],
+
+      "sources": [
+        "https://www.sec.gov/...",
+        "https://stockanalysis.com/...",
+        "https://openinsider.com/..."
+      ],
+
+      "priceHistory": [120.40, 121.10, 119.85, 122.20, 123.00, 122.50, 124.10, 125.00, 124.50, 126.00, 125.80, 127.20, 128.00, 127.50, 128.90, 129.50, 130.00, 131.20, 130.80, 132.10]
     }
   ]
 }
 
-Exactly 10 picks. Real tickers. Concrete dollar levels. priceHistory should be 20 numbers most-recent-last (use [] if unavailable).`;
+CRITICAL:
+- Use REAL trailing TTM P/E and forward P/E from latest filings/consensus estimates
+- Insider data must come from actual SEC Form 4 filings (search sec.gov/edgar or openinsider.com)
+- The "sources" array MUST contain actual URLs you used during web_search — at least 3 per pick
+- Each score 0-100. Composite = valuation × 0.40 + growth × 0.30 + insider × 0.15 + volume × 0.15 (institutional is informational only, NOT scored into composite)
+- Verdict: ≥80 Deep Value; 65-79 Undervalued; 50-64 Fair; <50 Overvalued
+- Rank picks by compositeScore descending
+- Exactly 10 picks. priceHistory 20 numbers most-recent-last (use [] if unavailable).
+- For "institutional" — if data is paywalled or unavailable, set dataAvailability="Limited" and use "No data" / "Unknown" rather than guessing.`;
 
   const { parsed, usage } = await callClaude(apiKey, prompt, mode, m.industryTokens, m.industrySearches);
 
-  // Normalize defensively before returning
   return {
     data: {
       industry: parsed?.industry || ind.label,
-      industryThesis: parsed?.industryThesis || '',
-      industrySmartMoney: parsed?.industrySmartMoney || '',
+      industryValuation: parsed?.industryValuation || '',
+      sectorMedianPe: parsed?.sectorMedianPe || null,
+      industrySources: Array.isArray(parsed?.industrySources)
+        ? parsed.industrySources.filter((s) => typeof s === 'string' && s.startsWith('http')).slice(0, 6)
+        : [],
       picks: normalizePicks(parsed?.picks),
     },
     usage,
@@ -476,62 +669,125 @@ export async function fetchTickerDeepDive(apiKey, ticker, { mode }) {
     throw new ApiError(KNOWN_ERROR_KINDS.UNKNOWN, `Invalid ticker: "${ticker}"`);
   }
 
-  const prompt = `You are an equity research analyst. Today is ${today}.
-Deep-dive ${symbol}. Use web_search (max ${m.industrySearches}) to gather:
-- Latest news (last 7 days) — headlines that moved the stock
-- Recent earnings — beat/miss, guidance, analyst reactions
-- Smart money: insider Form 4, unusual options, dark pool prints, 13F changes
-- Technical setup — current price, key support/resistance, RSI, recent pattern
-- Upcoming catalysts (next 30 days)
+  const prompt = `You are a value-investing analyst. Today is ${today}.
+Deep-dive ${symbol} as a long-term investment. Use web_search (max ${m.industrySearches}) to gather:
+- Trailing P/E, forward P/E, PEG, P/B, EV/EBITDA — vs sector medians
+- Revenue growth YoY and 5-year CAGR
+- EPS growth YoY and 5-year CAGR
+- Operating margin, net margin, ROE, ROIC trends
+- Recent insider buying/selling from SEC Form 4 filings (last 6 months) — name buyers, sizes, dates
+- Volume profile — 20-day avg, accumulation/distribution
+- Institutional / smart money: notable 13F changes, dark pool sentiment, short interest, options flow
+- Latest earnings — beat/miss, guidance direction
+- Balance sheet strength (debt/equity, FCF)
+- Bull case, bear case, base case 12-month target
 - Top 3 risks
-- Forward outlook — bull case, bear case, base case 6-month target
+
+${SOURCE_GUIDANCE}
 
 Return ONLY this JSON (no markdown, no preamble):
 {
   "ticker": "${symbol}",
   "company": "Full Name",
   "currentPrice": 123.45,
-  "dailyChange": "+X.X%",
-  "ytdChange": "+X.X%",
   "marketCap": "$XB",
   "sector": "name",
-  "verdict": "Strong Buy | Buy | Hold | Sell",
-  "convictionScore": 85,
-  "snapshot": "3 sentences — the elevator pitch on this stock RIGHT NOW",
-  "recentNews": [
-    { "date": "YYYY-MM-DD", "headline": "specific", "impact": "high|medium|low", "direction": "bullish|bearish|neutral" }
-  ],
-  "earnings": {
-    "lastDate": "YYYY-MM-DD", "result": "EPS/Rev vs est", "guidance": "raised|lowered|maintained",
-    "nextDate": "YYYY-MM-DD", "expectedMove": "±X%"
+
+  "valuation": {
+    "pe": 12.4,
+    "forwardPe": 10.8,
+    "peg": 0.9,
+    "priceBook": 2.1,
+    "evToEbitda": 8.5,
+    "dividendYield": "X.X%",
+    "vsSectorMedianPe": "-32%",
+    "score": 85
   },
-  "smartMoney": {
-    "darkPoolSentiment": "Bullish|Neutral|Bearish",
-    "institutionalFlow": "Net buying|Net selling|Mixed",
-    "insiderActivity": "specific names + sizes if available",
-    "optionsFlow": "C/P ratio + notable strikes",
+
+  "growth": {
+    "revenueGrowthYoY": "+14%",
+    "revenue5yrCagr": "11.2%",
+    "epsGrowthYoY": "+22%",
+    "eps5yrCagr": "15%",
+    "operatingMargin": "22%",
+    "netMargin": "18%",
+    "roe": "16%",
+    "roic": "12%",
+    "fcfGrowth": "+18%",
+    "score": 78
+  },
+
+  "insiderActivity": {
+    "last6moDirection": "Net buying | Net selling | Mixed | No activity",
+    "totalBuys": 3,
+    "totalSells": 0,
+    "totalBuyValue": "$X",
+    "totalSellValue": "$X",
+    "transactions": [
+      { "date": "YYYY-MM-DD", "name": "Name (Title)", "type": "Buy|Sell", "shares": "X", "value": "$X" }
+    ],
+    "score": 88
+  },
+
+  "volume": {
+    "avgDaily20d": "X.XM",
+    "currentVsAvg": "X.XXx",
+    "trend": "rising|flat|falling",
+    "liquidityGrade": "A|B|C|D",
     "score": 75
   },
-  "technicals": {
-    "trend": "label", "keyLevels": "support $X, resistance $Y",
-    "rsi": "value", "pattern": "specific", "volume": "above/below avg"
+
+  "institutional": {
+    "darkPoolSentiment": "Bullish | Neutral | Bearish | Unknown",
+    "institutionalFlow": "Net buying | Net selling | Mixed | Unknown",
+    "notable13fChanges": "Specific funds + size + direction last quarter, or 'No notable changes'",
+    "shortInterest": "X.X% of float, X days to cover (trend)",
+    "optionsFlow": "C/P ratio + notable unusual activity, or 'No significant flow'",
+    "topHolders": ["Fund 1 (X% stake)", "Fund 2 (X% stake)"],
+    "dataAvailability": "Strong | Partial | Limited"
   },
-  "catalysts": [
-    { "date": "YYYY-MM-DD", "event": "specific", "impact": "high|medium|low" }
-  ],
-  "risks": ["risk 1", "risk 2", "risk 3"],
+
+  "balanceSheet": {
+    "debtToEquity": "X.XX",
+    "currentRatio": "X.X",
+    "fcf": "$X annual",
+    "cashOnHand": "$X",
+    "creditRating": "AA|A|BBB|BB|junk|N/A"
+  },
+
+  "earnings": {
+    "lastDate": "YYYY-MM-DD",
+    "result": "EPS $X vs est $Y, Rev $X vs est $Y",
+    "guidance": "raised|lowered|maintained",
+    "nextDate": "YYYY-MM-DD"
+  },
+
+  "compositeScore": 82,
+  "verdict": "Deep Value | Undervalued | Fair Value | Overvalued",
+  "snapshot": "3 sentences — the investment elevator pitch. WHY undervalued, what's the catalyst, what's the upside.",
+
   "outlook": {
-    "bullCase": "1-2 sentences + price target",
+    "bullCase": "1-2 sentences + 12-month upside target",
     "bearCase": "1-2 sentences + downside target",
-    "baseCase": "1-2 sentences + 6-month target"
+    "baseCase": "1-2 sentences + 12-month base target"
   },
-  "tradePlan": {
-    "entry": "$X-$Y", "stop": "$X (% below)", "target": "$X (% gain)", "horizon": "swing|position|long-term"
-  },
+
+  "risks": ["specific risk 1", "specific risk 2", "specific risk 3"],
+
+  "sources": [
+    "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=...",
+    "https://www.sec.gov/Archives/edgar/data/.../form4.xml",
+    "https://openinsider.com/...",
+    "https://stockanalysis.com/stocks/${symbol}/...",
+    "https://whalewisdom.com/stock/..."
+  ],
+
   "asOf": "${new Date().toISOString()}"
 }
 
-Real numbers. Concrete details.`;
+Real numbers from latest filings. Real SEC Form 4 names if available.
+"sources" array MUST contain 5-8 actual URLs you used. Prefer SEC EDGAR and primary sources.
+For "institutional" — if data is paywalled or genuinely unavailable, set dataAvailability="Limited" with "Unknown" values rather than guessing.`;
 
   const { parsed, usage } = await callClaude(apiKey, prompt, mode, Math.min(m.industryTokens, 8000), m.industrySearches);
   return { data: parsed, usage };

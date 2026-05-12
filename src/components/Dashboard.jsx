@@ -1,153 +1,127 @@
-import {
-  Target, TrendingUp, Sparkles, Activity, Layers, Calendar,
-  Zap, BarChart3, Eye, Sunrise,
-} from 'lucide-react';
+import { Target, TrendingUp, Users, Activity, BarChart3 } from 'lucide-react';
+import StatTile from './StatTile.jsx';
 
-import StatTile from './StatTile';
-import SectorHeatmap from './SectorHeatmap';
-import CatalystTimeline from './CatalystTimeline';
-import VolatilityScatter from './VolatilityScatter';
-import SmartMoneyPanel from './SmartMoneyPanel';
-import NextDayForecast from './NextDayForecast';
-import Sparkline from './Sparkline';
+const VERDICT_COLORS = {
+  deep: '#34d399',
+  undervalued: '#22d3ee',
+  fair: '#fbbf24',
+  overvalued: '#f87171',
+};
 
-export default function Dashboard({ aggregate, regime, onSectorClick }) {
-  const agg = aggregate || {};
-  const stats = agg.stats;
-  const sectorAgg = Array.isArray(agg.sectorAgg) ? agg.sectorAgg : [];
-  const topConviction = Array.isArray(agg.topConviction) ? agg.topConviction : [];
-  const catalysts = Array.isArray(agg.catalysts) ? agg.catalysts : [];
-  const nextDayBullish = Array.isArray(agg.nextDayBullish) ? agg.nextDayBullish : [];
-  const allPicks = Array.isArray(agg.allPicks) ? agg.allPicks : [];
+export default function Dashboard({ aggregate, onSectorClick }) {
+  const stats = aggregate?.stats;
+  const sectorAgg = Array.isArray(aggregate?.sectorAgg) ? aggregate.sectorAgg : [];
+  const valuationDist = aggregate?.valuationDist || { deep: 0, undervalued: 0, fair: 0, overvalued: 0 };
 
   if (!stats) {
     return (
-      <div className="p-12 rounded-2xl border border-stone-800/60 bg-stone-950/30 text-center">
-        <Activity className="w-8 h-8 text-stone-600 mx-auto mb-3 spin-slow" />
-        <p className="text-stone-500">Waiting for sector research to complete…</p>
+      <div className="bg-white/5 border border-white/10 rounded-xl p-12 text-center text-white/40">
+        Dashboard appears once sector scans complete.
       </div>
     );
   }
 
-  const bullishPct = stats.totalPicks > 0 ? (stats.bullishNextDay / stats.totalPicks) * 100 : 0;
+  const totalValuation = Object.values(valuationDist).reduce((s, n) => s + n, 0);
 
   return (
-    <div className="space-y-8 slide-up">
+    <div className="space-y-6">
+      {/* Hero stats */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+        <StatTile label="Total Picks" value={stats.totalPicks} sub={`${stats.sectors} sectors`} />
+        <StatTile label="Deep Value" value={stats.deepValueCount} sub="composite ≥ 80" accent="#34d399" />
+        <StatTile label="Undervalued" value={stats.undervaluedCount} sub="65-79" accent="#22d3ee" />
+        <StatTile label="Avg P/E" value={stats.avgPe ?? '—'} sub={`fwd ${stats.avgForwardPe ?? '—'}`} />
+        <StatTile label="Avg Rev YoY" value={stats.avgRevenueGrowth != null ? `${stats.avgRevenueGrowth}%` : '—'} sub={`EPS ${stats.avgEpsGrowth != null ? stats.avgEpsGrowth + '%' : '—'}`} accent="#34d399" />
+        <StatTile label="Insider Buys" value={stats.insiderBuyingCount} sub={`of ${stats.totalPicks}`} accent="#a78bfa" />
+      </div>
 
-      <section>
-        <div className="flex items-center justify-between mb-4 px-1">
-          <div className="flex items-center gap-2">
-            <Sparkles className="w-4 h-4 text-amber-400/80" />
-            <h2 className="mono text-[10px] tracking-[0.25em] uppercase text-stone-400">Run summary</h2>
+      {/* Valuation distribution bar */}
+      {totalValuation > 0 && (
+        <div className="bg-white/5 border border-white/10 rounded-xl p-5">
+          <div className="flex items-center gap-2 mb-4">
+            <BarChart3 size={14} className="text-white/60" />
+            <h3 className="display text-sm text-white">Valuation Distribution</h3>
+          </div>
+          <div className="flex h-8 rounded-lg overflow-hidden">
+            {Object.entries(valuationDist).map(([k, v]) => {
+              if (v === 0) return null;
+              const pct = (v / totalValuation) * 100;
+              return (
+                <div
+                  key={k}
+                  className="flex items-center justify-center text-[11px] font-medium text-white"
+                  style={{ background: VERDICT_COLORS[k], width: `${pct}%`, color: '#0a0a14' }}
+                  title={`${k}: ${v} (${pct.toFixed(0)}%)`}
+                >
+                  {pct > 8 ? `${v}` : ''}
+                </div>
+              );
+            })}
+          </div>
+          <div className="flex items-center gap-4 mt-3 text-[11px] flex-wrap">
+            <Legend color={VERDICT_COLORS.deep} label="Deep Value" count={valuationDist.deep} />
+            <Legend color={VERDICT_COLORS.undervalued} label="Undervalued" count={valuationDist.undervalued} />
+            <Legend color={VERDICT_COLORS.fair} label="Fair Value" count={valuationDist.fair} />
+            <Legend color={VERDICT_COLORS.overvalued} label="Overvalued" count={valuationDist.overvalued} />
           </div>
         </div>
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-          <StatTile label="Total picks" value={stats.totalPicks} icon={<Target className="w-4 h-4" />}
-                    accent="#d4a574" sub={`${stats.sectorsCovered} sectors`} />
-          <StatTile label="Avg score" value={stats.avgScore} icon={<BarChart3 className="w-4 h-4" />}
-                    accent={stats.avgScore >= 75 ? '#34d399' : stats.avgScore >= 60 ? '#fbbf24' : '#94a3b8'}
-                    sub={`${stats.highConviction} high conviction`} />
-          <StatTile label="Strong buys" value={stats.strongBuys} icon={<Zap className="w-4 h-4" />}
-                    accent="#34d399" sub={`of ${stats.totalPicks}`} />
-          <StatTile label="Bullish next-day" value={stats.bullishNextDay} icon={<Sunrise className="w-4 h-4" />}
-                    accent="#fbbf24" sub={`${bullishPct.toFixed(0)}% of universe`} />
-        </div>
-      </section>
-
-      {sectorAgg.length > 0 && (
-        <section>
-          <SectionHeader icon={<Layers className="w-4 h-4 text-amber-400/80" />}
-                         title="Sector heatmap"
-                         subtitle="Avg score & strong-buy density per sector — click to jump to detail" />
-          <SectorHeatmap sectors={sectorAgg} onSectorClick={onSectorClick} />
-        </section>
       )}
 
-      <section className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <div>
-          <SectionHeader icon={<TrendingUp className="w-4 h-4 text-amber-400/80" />}
-                         title="Top conviction"
-                         subtitle="Highest-scored picks across all sectors" tight />
-          <div className="rounded-2xl border border-stone-800/70 bg-stone-950/40 overflow-hidden">
-            {topConviction.length === 0 ? (
-              <div className="p-6 text-stone-500 text-sm text-center">No picks yet</div>
-            ) : (
-              <ul className="divide-y divide-stone-900/80">
-                {topConviction.map((p, i) => (
-                  <li key={i} className="flex items-center gap-3 p-3.5 hover:bg-stone-900/30 transition">
-                    <span className="display text-2xl text-stone-700 font-light w-6 text-right">
-                      {String(i + 1).padStart(2, '0')}
-                    </span>
-                    <span className="mono text-sm font-bold w-16 ticker-glow"
-                          style={{ color: p.industryColor || '#d4a574' }}>
-                      {p.ticker || '?'}
-                    </span>
-                    <div className="flex-1 min-w-0">
-                      <div className="text-xs text-stone-300 truncate">{p.company || ''}</div>
-                      <div className="mono text-[10px] text-stone-600 uppercase tracking-wider mt-0.5">
-                        {p.industryShort || ''} · {p.action || ''}
-                      </div>
-                    </div>
-                    {p.priceHistory?.length >= 2 && <Sparkline data={p.priceHistory} width={50} height={20} />}
-                    <div className="text-right shrink-0">
-                      <div className="display text-lg leading-none"
-                           style={{ color: (p.score || 0) >= 85 ? '#fbbf24' : (p.score || 0) >= 70 ? '#a3e635' : '#60a5fa' }}>
-                        {p.score || 0}
-                      </div>
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
+      {/* Sector breakdown */}
+      <div className="bg-white/5 border border-white/10 rounded-xl overflow-hidden">
+        <div className="px-5 py-3 border-b border-white/10">
+          <h3 className="display text-sm text-white">Sector Breakdown</h3>
         </div>
-
-        <div>
-          <SectionHeader icon={<Sunrise className="w-4 h-4 text-amber-400/80" />}
-                         title="Next-day bullish setups"
-                         subtitle="Probabilistic forecasts — not guarantees" tight />
-          <NextDayForecast picks={nextDayBullish} />
+        <div className="divide-y divide-white/5">
+          {sectorAgg.map((s) => (
+            <button
+              key={s.id}
+              onClick={() => onSectorClick && onSectorClick(s.id)}
+              className="w-full px-5 py-3 hover:bg-white/[0.03] transition text-left flex items-center gap-4"
+            >
+              <div
+                className="w-8 h-8 rounded mono text-xs font-bold flex items-center justify-center flex-shrink-0"
+                style={{ background: `${s.color}25`, color: s.color }}
+              >
+                {s.short?.slice(0, 2) || '??'}
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="text-sm text-white font-medium">{s.label}</div>
+                <div className="text-[11px] text-white/45 truncate">
+                  {s.deepValueCount} deep value · {s.undervaluedCount} undervalued · {s.insiderBuyingCount} w/ insider buying
+                </div>
+              </div>
+              <div className="flex items-center gap-4 text-xs flex-shrink-0">
+                <div className="text-right hidden sm:block">
+                  <div className="text-[10px] text-white/40 uppercase">Picks</div>
+                  <div className="mono text-white/85">{s.pickCount}</div>
+                </div>
+                <div className="text-right hidden sm:block">
+                  <div className="text-[10px] text-white/40 uppercase">Avg P/E</div>
+                  <div className="mono text-white/85">{s.avgPe ?? '—'}</div>
+                </div>
+                <div className="text-right hidden md:block">
+                  <div className="text-[10px] text-white/40 uppercase">Avg Rev YoY</div>
+                  <div className="mono text-emerald-300">{s.avgRevenueGrowth != null ? `${s.avgRevenueGrowth}%` : '—'}</div>
+                </div>
+                <div className="text-right">
+                  <div className="text-[10px] text-white/40 uppercase">Avg Score</div>
+                  <div className="display text-amber-300 text-lg leading-none">{s.avgCompositeScore ?? '—'}</div>
+                </div>
+              </div>
+            </button>
+          ))}
         </div>
-      </section>
-
-      <section>
-        <SectionHeader icon={<Eye className="w-4 h-4 text-amber-400/80" />}
-                       title="Where the dark data points"
-                       subtitle="Aggregated dark pool, institutional flow, insider, and options signals" />
-        <SmartMoneyPanel allPicks={allPicks} />
-      </section>
-
-      <section className="grid grid-cols-1 lg:grid-cols-5 gap-6">
-        <div className="lg:col-span-3">
-          <SectionHeader icon={<Activity className="w-4 h-4 text-amber-400/80" />}
-                         title="Volatility map"
-                         subtitle="High score + low IV = sweet spot. High vol = wider stops, bigger moves." tight />
-          <VolatilityScatter picks={allPicks} />
-        </div>
-
-        <div className="lg:col-span-2">
-          <SectionHeader icon={<Calendar className="w-4 h-4 text-amber-400/80" />}
-                         title="Catalyst timeline"
-                         subtitle="Next 14 days · earnings, FDA, macro events" tight />
-          <div className="rounded-2xl border border-stone-800/70 bg-stone-950/40 p-4 sm:p-5 max-h-[480px] overflow-y-auto">
-            <CatalystTimeline catalysts={catalysts} weekCatalysts={regime?.thisWeekCatalysts || []} />
-          </div>
-        </div>
-      </section>
+      </div>
     </div>
   );
 }
 
-function SectionHeader({ icon, title, subtitle, tight = false }) {
+function Legend({ color, label, count }) {
   return (
-    <div className={`flex items-end justify-between gap-3 ${tight ? 'mb-3' : 'mb-4'} px-1`}>
-      <div>
-        <div className="flex items-center gap-2 mb-1">
-          {icon}
-          <h2 className="display text-xl sm:text-2xl text-stone-100 font-light">{title}</h2>
-        </div>
-        {subtitle && <p className="text-[11px] text-stone-500">{subtitle}</p>}
-      </div>
-    </div>
+    <span className="flex items-center gap-1.5 text-white/60">
+      <span className="w-3 h-3 rounded-sm" style={{ background: color }} />
+      {label} <span className="mono text-white/85">{count}</span>
+    </span>
   );
 }

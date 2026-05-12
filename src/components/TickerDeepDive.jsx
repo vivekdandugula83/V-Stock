@@ -1,20 +1,27 @@
 import { useState, useEffect } from 'react';
-import { X, Loader2, Search, TrendingUp, TrendingDown, Activity, AlertTriangle } from 'lucide-react';
+import { X, Loader2, Search, Users, TrendingUp, AlertTriangle, DollarSign, BarChart3, Building2 } from 'lucide-react';
 import { fetchTickerDeepDive } from '../lib/agent.js';
 import ApiError from './ApiError.jsx';
+import SourceList from './SourceList.jsx';
+import InstitutionalPanel from './InstitutionalPanel.jsx';
 
-const CACHE_KEY = 'vstock_deep_dives_v5';
+const CACHE_KEY = 'vstock_deep_dives_v7';
 const TTL_MS = 10 * 60 * 1000;
 
 function loadCache() {
-  try {
-    const raw = localStorage.getItem(CACHE_KEY);
-    return raw ? JSON.parse(raw) : {};
-  } catch { return {}; }
+  try { return JSON.parse(localStorage.getItem(CACHE_KEY) || '{}'); }
+  catch { return {}; }
 }
-function saveCache(cache) {
-  try { localStorage.setItem(CACHE_KEY, JSON.stringify(cache)); } catch {}
+function saveCache(c) {
+  try { localStorage.setItem(CACHE_KEY, JSON.stringify(c)); } catch {}
 }
+
+const VERDICT_STYLES = {
+  'Deep Value':  'bg-emerald-500/15 border-emerald-400/40 text-emerald-200',
+  'Undervalued': 'bg-cyan-500/10 border-cyan-400/30 text-cyan-200',
+  'Fair Value':  'bg-amber-500/10 border-amber-400/30 text-amber-200',
+  'Overvalued':  'bg-rose-500/10 border-rose-400/30 text-rose-200',
+};
 
 export default function TickerDeepDive({ ticker, apiKey, mode, onClose, onUsage }) {
   const [data, setData] = useState(null);
@@ -31,11 +38,11 @@ export default function TickerDeepDive({ ticker, apiKey, mode, onClose, onUsage 
       setFromCache(true);
       return;
     }
-    runDeepDive(false);
+    runDeepDive();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ticker]);
 
-  async function runDeepDive(force) {
+  async function runDeepDive() {
     if (!apiKey) { setError({ kind: 'auth', message: 'No API key' }); return; }
     setLoading(true); setError(null); setFromCache(false);
     try {
@@ -56,8 +63,7 @@ export default function TickerDeepDive({ ticker, apiKey, mode, onClose, onUsage 
 
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center p-4 sm:p-8 overflow-y-auto bg-black/80 backdrop-blur-sm">
-      <div className="relative w-full max-w-4xl bg-[#0a0a14] border border-white/10 rounded-2xl shadow-2xl my-auto">
-        {/* header */}
+      <div className="relative w-full max-w-5xl bg-[#0a0a14] border border-white/10 rounded-2xl shadow-2xl my-auto">
         <div className="sticky top-0 z-10 px-6 py-4 border-b border-white/10 bg-[#0a0a14]/95 backdrop-blur flex items-center justify-between rounded-t-2xl">
           <div className="flex items-center gap-3 min-w-0">
             <div className="w-10 h-10 rounded-lg bg-amber-400/15 flex items-center justify-center flex-shrink-0">
@@ -69,40 +75,33 @@ export default function TickerDeepDive({ ticker, apiKey, mode, onClose, onUsage 
                 {data?.company && <span className="text-sm text-white/60 truncate">· {data.company}</span>}
               </div>
               <div className="text-xs text-white/40">
-                Deep-dive research {fromCache && '· cached'} {loading && '· loading...'}
+                Value deep-dive {fromCache && '· cached'} {loading && '· loading...'}
               </div>
             </div>
           </div>
           <div className="flex items-center gap-2">
             {!loading && (
-              <button
-                onClick={() => runDeepDive(true)}
-                className="text-xs px-3 py-1.5 rounded border border-white/15 text-white/70 hover:bg-white/5"
-              >
+              <button onClick={runDeepDive} className="text-xs px-3 py-1.5 rounded border border-white/15 text-white/70 hover:bg-white/5">
                 Refresh
               </button>
             )}
-            <button
-              onClick={onClose}
-              className="w-8 h-8 rounded-lg bg-white/5 hover:bg-white/10 flex items-center justify-center text-white/60 hover:text-white"
-            >
+            <button onClick={onClose} className="w-8 h-8 rounded-lg bg-white/5 hover:bg-white/10 flex items-center justify-center text-white/60 hover:text-white">
               <X size={16} />
             </button>
           </div>
         </div>
 
-        {/* body */}
         <div className="p-6">
           {loading && !data && (
             <div className="flex flex-col items-center justify-center py-16 gap-3">
               <Loader2 size={28} className="text-amber-300 animate-spin" />
-              <div className="text-sm text-white/60">Pulling research on {ticker}...</div>
-              <div className="text-xs text-white/40">News, earnings, smart money, technicals, catalysts</div>
+              <div className="text-sm text-white/60">Running fundamental scan on {ticker}...</div>
+              <div className="text-xs text-white/40">Valuation · Growth · SEC insider · Balance sheet</div>
             </div>
           )}
 
           {error && (
-            <ApiError error={error} title={`Failed to research ${ticker}`} onRetry={() => runDeepDive(true)} />
+            <ApiError error={error} title={`Failed to research ${ticker}`} onRetry={runDeepDive} />
           )}
 
           {data && !loading && <DeepDiveContent data={data} />}
@@ -113,157 +112,174 @@ export default function TickerDeepDive({ ticker, apiKey, mode, onClose, onUsage 
 }
 
 function DeepDiveContent({ data }) {
-  const verdict = String(data?.verdict || '').toLowerCase();
-  const verdictClr =
-    verdict.includes('strong buy') ? 'bg-emerald-500/15 border-emerald-400/40 text-emerald-200' :
-    verdict.includes('buy') ? 'bg-emerald-500/10 border-emerald-400/30 text-emerald-200' :
-    verdict.includes('hold') ? 'bg-amber-500/10 border-amber-400/30 text-amber-200' :
-    verdict.includes('sell') ? 'bg-rose-500/10 border-rose-400/30 text-rose-200' :
-                               'bg-white/5 border-white/15 text-white/70';
+  const verdict = data?.verdict || 'Fair Value';
+  const verdictClr = VERDICT_STYLES[verdict] || VERDICT_STYLES['Fair Value'];
+  const v = data?.valuation || {};
+  const g = data?.growth || {};
+  const ins = data?.insiderActivity || {};
+  const vol = data?.volume || {};
+  const bs = data?.balanceSheet || {};
+  const txs = Array.isArray(ins?.transactions) ? ins.transactions : [];
 
   return (
     <div className="space-y-5">
-      {/* hero */}
+      {/* Hero */}
       <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
         <Stat label="Price" value={data?.currentPrice != null ? `$${data.currentPrice}` : '—'} />
-        <Stat label="Daily" value={data?.dailyChange || '—'} accent={String(data?.dailyChange || '').includes('-') ? 'red' : 'green'} />
-        <Stat label="YTD" value={data?.ytdChange || '—'} accent={String(data?.ytdChange || '').includes('-') ? 'red' : 'green'} />
         <Stat label="Mkt Cap" value={data?.marketCap || '—'} />
-        <Stat label="Score" value={data?.convictionScore ?? '—'} accent="amber" />
+        <Stat label="Sector" value={data?.sector || '—'} />
+        <Stat label="Composite" value={data?.compositeScore ?? '—'} accent="amber" />
+        <Stat label="Verdict" value={verdict} />
       </div>
 
       <div className="flex items-center gap-3 flex-wrap">
         <span className={`text-xs uppercase tracking-wider px-3 py-1.5 rounded border ${verdictClr}`}>
-          {data?.verdict || 'Unrated'}
+          {verdict}
         </span>
-        <span className="text-xs text-white/50">Sector: {data?.sector || '—'}</span>
       </div>
 
       {data?.snapshot && (
         <div className="p-4 bg-amber-400/[0.06] border border-amber-400/20 rounded-lg">
-          <div className="text-[10px] uppercase tracking-wider text-amber-300/80 mb-1">Snapshot</div>
+          <div className="text-[10px] uppercase tracking-wider text-amber-300/80 mb-1">Investment Thesis</div>
           <div className="text-sm text-white/90 leading-relaxed">{data.snapshot}</div>
         </div>
       )}
 
-      {/* outlook */}
+      {/* Four scoring panels */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <ScorePanel title="Valuation" score={v.score} weight="40%" color="text-cyan-300" icon={DollarSign}>
+          <KV k="P/E (TTM)" v={v.pe} />
+          <KV k="Forward P/E" v={v.forwardPe} />
+          <KV k="PEG" v={v.peg} />
+          <KV k="P/B" v={v.priceBook} />
+          <KV k="EV/EBITDA" v={v.evToEbitda} />
+          <KV k="Dividend Yield" v={v.dividendYield} />
+          <KV k="vs Sector Median" v={v.vsSectorMedianPe} />
+        </ScorePanel>
+
+        <ScorePanel title="Growth & Profitability" score={g.score} weight="30%" color="text-emerald-300" icon={TrendingUp}>
+          <KV k="Revenue YoY" v={g.revenueGrowthYoY} />
+          <KV k="Revenue 5yr CAGR" v={g.revenue5yrCagr} />
+          <KV k="EPS YoY" v={g.epsGrowthYoY} />
+          <KV k="EPS 5yr CAGR" v={g.eps5yrCagr} />
+          <KV k="Operating Margin" v={g.operatingMargin} />
+          <KV k="Net Margin" v={g.netMargin} />
+          <KV k="ROE" v={g.roe} />
+          <KV k="ROIC" v={g.roic} />
+          <KV k="FCF Growth" v={g.fcfGrowth} />
+        </ScorePanel>
+
+        <ScorePanel title="Insider Activity (SEC Form 4)" score={ins.score} weight="15%" color="text-violet-300" icon={Users}>
+          <KV k="6mo Direction" v={ins.last6moDirection} />
+          <KV k="Total Buys" v={ins.totalBuys} />
+          <KV k="Total Sells" v={ins.totalSells} />
+          <KV k="Buy Value" v={ins.totalBuyValue} />
+          <KV k="Sell Value" v={ins.totalSellValue} />
+          {txs.length > 0 && (
+            <div className="mt-2 pt-2 border-t border-white/10">
+              <div className="text-[10px] uppercase text-white/40 mb-1">Recent transactions</div>
+              <div className="space-y-1.5 max-h-40 overflow-y-auto">
+                {txs.slice(0, 6).map((tx, i) => {
+                  const isBuy = String(tx?.type || '').toLowerCase() === 'buy';
+                  return (
+                    <div key={i} className="text-[11px] flex items-start gap-2">
+                      <span className="mono text-white/45 w-20 flex-shrink-0">{tx?.date || '—'}</span>
+                      <span className={`px-1.5 py-0.5 rounded text-[9px] uppercase ${
+                        isBuy ? 'bg-emerald-500/15 text-emerald-300' : 'bg-rose-500/15 text-rose-300'
+                      }`}>{tx?.type || '?'}</span>
+                      <span className="flex-1 text-white/80 break-words">{tx?.name || '—'} · {tx?.value || tx?.shares || '?'}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </ScorePanel>
+
+        <ScorePanel title="Volume & Liquidity" score={vol.score} weight="15%" color="text-amber-300" icon={BarChart3}>
+          <KV k="20d Avg Volume" v={vol.avgDaily20d} />
+          <KV k="Current vs Avg" v={vol.currentVsAvg} />
+          <KV k="Trend" v={vol.trend} />
+          <KV k="Liquidity Grade" v={vol.liquidityGrade} />
+        </ScorePanel>
+      </div>
+
+      {/* Balance sheet */}
+      {(bs.debtToEquity || bs.fcf) && (
+        <Section title="Balance Sheet" icon={Building2}>
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-sm">
+            <KV k="D/E" v={bs.debtToEquity} />
+            <KV k="Current Ratio" v={bs.currentRatio} />
+            <KV k="FCF" v={bs.fcf} />
+            <KV k="Cash" v={bs.cashOnHand} />
+            <KV k="Credit" v={bs.creditRating} />
+          </div>
+        </Section>
+      )}
+
+      {/* Earnings */}
+      {data?.earnings && (
+        <Section title="Earnings" icon={TrendingUp}>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+            <KV k="Last Date" v={data.earnings.lastDate} />
+            <KV k="Result" v={data.earnings.result} />
+            <KV k="Guidance" v={data.earnings.guidance} />
+            <KV k="Next Date" v={data.earnings.nextDate} />
+          </div>
+        </Section>
+      )}
+
+      {/* Outlook */}
       {data?.outlook && (
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-          <OutlookCard tone="bull" title="Bull Case" body={data.outlook.bullCase} />
+          <OutlookCard tone="bull" title="Bull Case (12mo)" body={data.outlook.bullCase} />
           <OutlookCard tone="base" title="Base Case" body={data.outlook.baseCase} />
           <OutlookCard tone="bear" title="Bear Case" body={data.outlook.bearCase} />
         </div>
       )}
 
-      {/* news */}
-      {Array.isArray(data?.recentNews) && data.recentNews.length > 0 && (
-        <Section title="Recent News" icon={Activity}>
-          <div className="space-y-2">
-            {data.recentNews.slice(0, 6).map((n, i) => {
-              const dirClr = String(n?.direction || '').includes('bull') ? 'text-emerald-300' :
-                             String(n?.direction || '').includes('bear') ? 'text-rose-300' : 'text-white/50';
-              return (
-                <div key={i} className="p-3 bg-white/[0.03] border border-white/5 rounded-lg">
-                  <div className="flex items-start gap-3">
-                    <div className="text-[10px] mono text-white/40 mt-0.5 flex-shrink-0">{n?.date || '—'}</div>
-                    <div className="flex-1">
-                      <div className="text-sm text-white/95">{n?.headline || ''}</div>
-                      <div className={`text-[10px] mt-1 uppercase tracking-wider ${dirClr}`}>
-                        {n?.impact || 'medium'} · {n?.direction || 'neutral'}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
+      {/* Risks */}
+      {Array.isArray(data?.risks) && data.risks.length > 0 && (
+        <Section title="Risks" icon={AlertTriangle} accent="rose">
+          <ul className="space-y-1.5 text-sm">
+            {data.risks.slice(0, 5).map((r, i) => (
+              <li key={i} className="flex items-start gap-2 text-white/85">
+                <span className="text-rose-400 mt-1">•</span>
+                <span>{r}</span>
+              </li>
+            ))}
+          </ul>
         </Section>
       )}
 
-      {/* smart money + technicals */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {data?.smartMoney && (
-          <Section title="Smart Money" icon={TrendingUp}>
-            <div className="space-y-2 text-sm">
-              <KV k="Dark Pool" v={data.smartMoney.darkPoolSentiment} />
-              <KV k="Inst. Flow" v={data.smartMoney.institutionalFlow} />
-              <KV k="Insider" v={data.smartMoney.insiderActivity} />
-              <KV k="Options" v={data.smartMoney.optionsFlow} />
-              <KV k="Score" v={data.smartMoney.score != null ? `${data.smartMoney.score}/100` : '—'} />
-            </div>
-          </Section>
-        )}
-        {data?.technicals && (
-          <Section title="Technicals" icon={Activity}>
-            <div className="space-y-2 text-sm">
-              <KV k="Trend" v={data.technicals.trend} />
-              <KV k="Levels" v={data.technicals.keyLevels} />
-              <KV k="RSI" v={data.technicals.rsi} />
-              <KV k="Pattern" v={data.technicals.pattern} />
-              <KV k="Volume" v={data.technicals.volume} />
-            </div>
-          </Section>
-        )}
-      </div>
-
-      {/* catalysts + risks */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {Array.isArray(data?.catalysts) && data.catalysts.length > 0 && (
-          <Section title="Upcoming Catalysts" icon={TrendingUp}>
-            <div className="space-y-2">
-              {data.catalysts.slice(0, 5).map((c, i) => (
-                <div key={i} className="flex items-start gap-3 text-xs">
-                  <div className="mono text-white/50 w-20 flex-shrink-0">{c?.date || 'TBD'}</div>
-                  <div className="flex-1 text-white/85">{c?.event || ''}</div>
-                  <div className="text-[10px] uppercase text-white/40">{c?.impact || 'med'}</div>
-                </div>
-              ))}
-            </div>
-          </Section>
-        )}
-        {Array.isArray(data?.risks) && data.risks.length > 0 && (
-          <Section title="Risks" icon={AlertTriangle} accent="rose">
-            <ul className="space-y-1.5 text-xs text-white/85">
-              {data.risks.slice(0, 5).map((r, i) => (
-                <li key={i} className="flex items-start gap-2">
-                  <span className="text-rose-400 mt-1">•</span>
-                  <span>{r}</span>
-                </li>
-              ))}
-            </ul>
-          </Section>
-        )}
-      </div>
-
-      {/* trade plan */}
-      {data?.tradePlan && (
-        <Section title="Trade Plan" icon={TrendingUp} accent="amber">
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
-            <KV k="Entry" v={data.tradePlan.entry} />
-            <KV k="Stop" v={data.tradePlan.stop} />
-            <KV k="Target" v={data.tradePlan.target} />
-            <KV k="Horizon" v={data.tradePlan.horizon} />
-          </div>
-        </Section>
+      {/* Institutional / smart money */}
+      {data?.institutional && (
+        <InstitutionalPanel institutional={data.institutional} />
       )}
+
+      {/* Sources — full attribution */}
+      <div className="pt-2">
+        <SourceList sources={data?.sources || []} label="Sources used in this research" />
+        <div className="mt-3 text-[11px] text-stone-500 italic">
+          Always cross-check critical figures (P/E, insider Form 4, 13F) directly at <a href="https://www.sec.gov/edgar" target="_blank" rel="noreferrer" className="underline hover:text-amber-300">sec.gov/edgar</a> before committing capital.
+        </div>
+      </div>
     </div>
   );
 }
 
 function Stat({ label, value, accent }) {
-  const clr = accent === 'green' ? 'text-emerald-300' :
-              accent === 'red' ? 'text-rose-300' :
-              accent === 'amber' ? 'text-amber-300' : 'text-white';
+  const clr = accent === 'amber' ? 'text-amber-300' : 'text-white';
   return (
     <div className="bg-white/[0.03] border border-white/10 rounded-lg p-3">
       <div className="text-[10px] uppercase tracking-wider text-white/40">{label}</div>
-      <div className={`mono text-base ${clr} mt-0.5`}>{value}</div>
+      <div className={`mono text-base ${clr} mt-0.5 truncate`}>{value}</div>
     </div>
   );
 }
 
 function Section({ title, icon: Icon, accent, children }) {
-  const clr = accent === 'rose' ? 'text-rose-300' : accent === 'amber' ? 'text-amber-300' : 'text-white/70';
+  const clr = accent === 'rose' ? 'text-rose-300' : 'text-white/70';
   return (
     <div className="bg-white/[0.02] border border-white/10 rounded-lg p-4">
       <div className="flex items-center gap-2 mb-3">
@@ -275,11 +291,27 @@ function Section({ title, icon: Icon, accent, children }) {
   );
 }
 
+function ScorePanel({ title, score, weight, color, icon: Icon, children }) {
+  return (
+    <div className="bg-white/[0.02] border border-white/10 rounded-lg p-4">
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2">
+          {Icon && <Icon size={13} className={color} />}
+          <h4 className="display text-sm text-white">{title}</h4>
+          <span className="text-[9px] mono text-white/30">{weight}</span>
+        </div>
+        <div className={`display text-2xl ${color || 'text-white'}`}>{score || 0}</div>
+      </div>
+      <div className="space-y-1.5">{children}</div>
+    </div>
+  );
+}
+
 function KV({ k, v }) {
   return (
     <div className="flex items-start justify-between gap-3 text-xs">
-      <span className="text-white/45 w-20 flex-shrink-0">{k}</span>
-      <span className="text-white/85 text-right flex-1 break-words">{v || '—'}</span>
+      <span className="text-white/45 w-32 flex-shrink-0">{k}</span>
+      <span className="text-white/85 text-right flex-1 break-words mono">{v ?? '—'}</span>
     </div>
   );
 }
