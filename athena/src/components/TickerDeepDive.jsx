@@ -6,8 +6,9 @@ import SourceList from './SourceList.jsx';
 import InstitutionalPanel from './InstitutionalPanel.jsx';
 import MarketSentimentPanel from './MarketSentimentPanel.jsx';
 import FinancialStrengthPanel from './FinancialStrengthPanel.jsx';
+import { safeStr } from './SafeText.jsx';
 
-const CACHE_KEY = 'vstock_deep_dives_v8';
+const CACHE_KEY = 'vstock_deep_dives_v9';
 const TTL_MS = 10 * 60 * 1000;
 
 function loadCache() {
@@ -143,7 +144,7 @@ function DeepDiveContent({ data }) {
       {data?.snapshot && (
         <div className="p-4 bg-amber-400/[0.06] border border-amber-400/20 rounded-lg">
           <div className="text-[10px] uppercase tracking-wider text-amber-300/80 mb-1">Investment Thesis</div>
-          <div className="text-sm text-white/90 leading-relaxed">{data.snapshot}</div>
+          <div className="text-sm text-white/90 leading-relaxed">{safeStr(data.snapshot)}</div>
         </div>
       )}
 
@@ -249,7 +250,7 @@ function DeepDiveContent({ data }) {
             {data.risks.slice(0, 5).map((r, i) => (
               <li key={i} className="flex items-start gap-2 text-white/85">
                 <span className="text-rose-400 mt-1">•</span>
-                <span>{r}</span>
+                <span>{safeStr(r)}</span>
               </li>
             ))}
           </ul>
@@ -315,7 +316,7 @@ function KV({ k, v }) {
   return (
     <div className="flex items-start justify-between gap-3 text-xs">
       <span className="text-white/45 w-32 flex-shrink-0">{k}</span>
-      <span className="text-white/85 text-right flex-1 break-words mono">{v ?? '—'}</span>
+      <span className="text-white/85 text-right flex-1 break-words mono">{v == null ? '—' : safeStr(v)}</span>
     </div>
   );
 }
@@ -330,7 +331,7 @@ function OutlookCard({ tone, title, body }) {
   return (
     <div className={`p-3 rounded-lg border ${styles}`}>
       <div className={`text-[10px] uppercase tracking-wider ${titleClr} mb-1`}>{title}</div>
-      <div className="text-xs text-white/90 leading-relaxed">{body || '—'}</div>
+      <div className="text-xs text-white/90 leading-relaxed">{safeStr(body) || '—'}</div>
     </div>
   );
 }

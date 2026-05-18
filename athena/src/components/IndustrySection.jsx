@@ -2,6 +2,7 @@ import { Loader2, RefreshCw } from 'lucide-react';
 import ValuePickCard from './ValuePickCard.jsx';
 import ApiError from './ApiError.jsx';
 import SourceList from './SourceList.jsx';
+import { safeStr } from './SafeText.jsx';
 
 export default function IndustrySection({
   industry, state, sectionId,
@@ -28,7 +29,7 @@ export default function IndustrySection({
           <div>
             <h3 className="display text-lg text-white">{industry.label}</h3>
             {data?.industryValuation && (
-              <div className="text-[11px] text-white/55 max-w-2xl line-clamp-2">{data.industryValuation}</div>
+              <div className="text-[11px] text-white/55 max-w-2xl line-clamp-2">{safeStr(data.industryValuation)}</div>
             )}
           </div>
         </div>

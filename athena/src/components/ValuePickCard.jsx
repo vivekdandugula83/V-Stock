@@ -5,6 +5,7 @@ import SourceList from './SourceList.jsx';
 import InstitutionalPanel from './InstitutionalPanel.jsx';
 import MarketSentimentPanel from './MarketSentimentPanel.jsx';
 import FinancialStrengthPanel from './FinancialStrengthPanel.jsx';
+import { safeStr } from './SafeText.jsx';
 
 const VERDICT_STYLES = {
   'Deep Value':    { ring: 'border-emerald-400/50',  bg: 'bg-emerald-500/10',  text: 'text-emerald-300',  badge: 'bg-emerald-500/20 text-emerald-200 border-emerald-400/40' },
@@ -197,14 +198,14 @@ export default function ValuePickCard({ pick, onTickerClick, watchlist = [], onT
             {pick.thesis && (
               <div>
                 <div className="text-[10px] uppercase tracking-wider text-amber-300/80 mb-1.5">Thesis</div>
-                <p className="text-sm text-white/85 leading-relaxed">{pick.thesis}</p>
+                <p className="text-sm text-white/85 leading-relaxed">{safeStr(pick.thesis)}</p>
               </div>
             )}
 
             {ins.largestBuy && (
               <div>
                 <div className="text-[10px] uppercase tracking-wider text-emerald-300/80 mb-1.5">Largest Insider Buy</div>
-                <p className="text-sm text-white/85 italic">{ins.largestBuy}</p>
+                <p className="text-sm text-white/85 italic">{safeStr(ins.largestBuy)}</p>
               </div>
             )}
 
@@ -266,7 +267,7 @@ export default function ValuePickCard({ pick, onTickerClick, watchlist = [], onT
                   {pick.risks.slice(0, 3).map((r, i) => (
                     <li key={i} className="text-sm text-white/75 flex items-start gap-2">
                       <span className="text-rose-400/70 mt-1">•</span>
-                      <span>{r}</span>
+                      <span>{safeStr(r)}</span>
                     </li>
                   ))}
                 </ul>

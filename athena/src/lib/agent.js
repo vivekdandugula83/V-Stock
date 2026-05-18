@@ -699,6 +699,46 @@ CRITICAL:
 }
 
 // ============================================================
+// STRATEGY DISPATCHER — Day Trade, Swing, Dividend
+// Value uses fetchIndustryPicks (above); these use the strategy-specific
+// prompts and normalizers defined in lib/strategies.js.
+// ============================================================
+import { STRATEGIES, buildStrategyPrompt, normalizeStrategyPicks } from './strategies.js';
+
+export async function fetchStrategyPicks(apiKey, strategyId, industryId, { mode }) {
+  const ind = INDUSTRIES.find((i) => i.id === industryId);
+  if (!ind) throw new ApiError(KNOWN_ERROR_KINDS.UNKNOWN, `Unknown industry: ${industryId}`);
+  const s = STRATEGIES[strategyId];
+  if (!s) throw new ApiError(KNOWN_ERROR_KINDS.UNKNOWN, `Unknown strategy: ${strategyId}`);
+
+  // Value goes through the original fetcher (with its dedicated normalizer)
+  if (strategyId === 'value') {
+    return fetchIndustryPicks(apiKey, industryId, { horizon: 'position', risk: 'moderate', regime: null, mode });
+  }
+
+  const m = MODES[mode];
+  const today = new Date().toDateString();
+  const prompt = buildStrategyPrompt(strategyId, ind.label, {
+    today,
+    maxSearches: m.industrySearches,
+    sourceGuidance: SOURCE_GUIDANCE,
+  });
+
+  const { parsed, usage } = await callClaude(apiKey, prompt, mode, m.industryTokens, m.industrySearches);
+  return {
+    data: {
+      industry: parsed?.industry || ind.label,
+      industryNotes: parsed?.industryNotes || '',
+      industrySources: Array.isArray(parsed?.industrySources)
+        ? parsed.industrySources.filter((u) => typeof u === 'string' && u.startsWith('http')).slice(0, 6)
+        : [],
+      picks: normalizeStrategyPicks(strategyId, parsed?.picks),
+    },
+    usage,
+  };
+}
+
+// ============================================================
 // DAILY MOVERS — top 50 stocks by daily momentum, mixed sectors
 // ============================================================
 export async function fetchDailyMovers(apiKey, { mode }) {
@@ -950,7 +990,7 @@ For "institutional" — if data is paywalled or genuinely unavailable, set dataA
 // CACHE — regime
 // ============================================================
 const REGIME_TTL_MS = 5 * 60 * 1000;
-const REGIME_CACHE_KEY = 'vstock_regime_cache_v2';
+const REGIME_CACHE_KEY = 'vstock_regime_cache_v3';
 export function loadCachedRegime(mode, risk, horizon) {
   try {
     const raw = localStorage.getItem(REGIME_CACHE_KEY);

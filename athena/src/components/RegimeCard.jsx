@@ -1,5 +1,6 @@
 import { TrendingUp, TrendingDown, Minus, BarChart3 } from 'lucide-react';
 import SourceList from './SourceList.jsx';
+import SafeText, { safeStr } from './SafeText.jsx';
 
 const VAL_STYLES = {
   cheap:     { ring: 'border-emerald-400/40', bg: 'bg-emerald-500/8',  text: 'text-emerald-300', icon: TrendingDown },
@@ -70,7 +71,7 @@ export default function RegimeCard({ regime, fromCache }) {
             )}
           </div>
           {regime?.valuationReason && (
-            <p className="text-sm text-white/75 leading-relaxed">{regime.valuationReason}</p>
+            <p className="text-sm text-white/75 leading-relaxed">{safeStr(regime.valuationReason)}</p>
           )}
         </div>
       </div>
@@ -106,7 +107,7 @@ export default function RegimeCard({ regime, fromCache }) {
       {regime?.insiderAggregate && (
         <div className="mb-4 p-3 bg-violet-500/5 border border-violet-400/20 rounded-lg">
           <div className="text-[10px] uppercase tracking-wider text-violet-300/80 mb-1">Aggregate Insider Activity</div>
-          <p className="text-sm text-white/80">{regime.insiderAggregate}</p>
+          <p className="text-sm text-white/80">{safeStr(regime.insiderAggregate)}</p>
         </div>
       )}
 
@@ -117,7 +118,7 @@ export default function RegimeCard({ regime, fromCache }) {
             {opps.map((o, i) => (
               <li key={i} className="text-sm text-white/80 flex items-start gap-2">
                 <span className="text-amber-300/60 mt-1">•</span>
-                <span>{o}</span>
+                <span>{safeStr(o)}</span>
               </li>
             ))}
           </ul>

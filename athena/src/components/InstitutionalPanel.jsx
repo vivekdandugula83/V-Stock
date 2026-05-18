@@ -1,4 +1,5 @@
 import { Activity, TrendingUp, TrendingDown, Eye, Building2 } from 'lucide-react';
+import { safeStr } from './SafeText.jsx';
 
 const SENTIMENT_STYLES = {
   bullish:  { bg: 'bg-emerald-500/10', border: 'border-emerald-400/30', text: 'text-emerald-300', icon: TrendingUp },
@@ -111,7 +112,7 @@ function Row({ k, v }) {
   return (
     <div className="flex items-start gap-2">
       <span className="text-stone-500 text-[10px] uppercase tracking-wider w-20 flex-shrink-0">{k}</span>
-      <span className="text-stone-200 flex-1">{v}</span>
+      <span className="text-stone-200 flex-1">{safeStr(v)}</span>
     </div>
   );
 }
