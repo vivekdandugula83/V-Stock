@@ -17,8 +17,19 @@ export const STRATEGIES = {
       { min: 50, label: 'Fair Value',  color: 'amber' },
       { min: 0,  label: 'Overvalued',  color: 'rose' },
     ],
-    // Value uses the existing dedicated ValuePickCard with hardcoded fields
     useExistingValueCard: true,
+    // Columns shown in the dashboard's detail table (per pick)
+    tableColumns: [
+      { key: 'pe',           label: 'P/E',       path: 'valuation.pe' },
+      { key: 'fwdPe',        label: 'Fwd P/E',   path: 'valuation.forwardPe' },
+      { key: 'peg',          label: 'PEG',       path: 'valuation.peg' },
+      { key: 'revGrowth',    label: 'Rev YoY',   path: 'growth.revenueGrowthYoY' },
+      { key: 'epsGrowth',    label: 'EPS YoY',   path: 'growth.epsGrowthYoY' },
+      { key: 'rev5yr',       label: '5y CAGR',   path: 'growth.revenue5yrCagr' },
+      { key: 'roic',         label: 'ROIC',      path: 'growth.roic' },
+      { key: 'piotroski',    label: 'Piotroski', path: 'growth.piotroskiScore' },
+      { key: 'insider',      label: 'Insider',   path: 'insiderActivity.last6moDirection' },
+    ],
   },
 
   swing: {
@@ -45,6 +56,17 @@ export const STRATEGIES = {
         primary: ['entry', 'stop', 'target1'], all: ['entry', 'stop', 'target1', 'target2', 'rrRatio'] },
       { id: 'flow',       label: 'Flow',        weightLabel: '15%', color: 'text-violet-300',
         primary: ['volumeProfile', 'institutional'], all: ['volumeProfile', 'institutional', 'options', 'shortInterest'] },
+    ],
+    tableColumns: [
+      { key: 'pattern',    label: 'Pattern',    bucketKey: 'setup',      field: 'pattern' },
+      { key: 'trend',      label: 'Trend',      bucketKey: 'setup',      field: 'trend' },
+      { key: 'rsi',        label: 'RSI',        bucketKey: 'setup',      field: 'rsi' },
+      { key: 'nextEvent',  label: 'Catalyst',   bucketKey: 'catalyst',   field: 'nextEvent' },
+      { key: 'daysToEvent',label: 'Days',       bucketKey: 'catalyst',   field: 'daysToEvent', accent: 'urgent' },
+      { key: 'entry',      label: 'Entry',      bucketKey: 'riskReward', field: 'entry' },
+      { key: 'stop',       label: 'Stop',       bucketKey: 'riskReward', field: 'stop' },
+      { key: 'target1',    label: 'Target',     bucketKey: 'riskReward', field: 'target1', accent: 'good' },
+      { key: 'rr',         label: 'R/R',        bucketKey: 'riskReward', field: 'rrRatio' },
     ],
   },
 
@@ -73,6 +95,25 @@ export const STRATEGIES = {
       { id: 'catalyst',   label: 'Catalyst',   weightLabel: '15%', color: 'text-violet-300',
         primary: ['nextEvent', 'newsToday'], all: ['nextEvent', 'daysToEvent', 'newsToday', 'analystAction'] },
     ],
+    tableColumns: [
+      { key: 'rsi',          label: 'RSI',       bucketKey: 'momentum',   field: 'rsi' },
+      { key: 'macd',         label: 'MACD',      bucketKey: 'momentum',   field: 'macd' },
+      { key: '5d',           label: '5d Ret',    bucketKey: 'momentum',   field: 'fiveDayReturn', accent: 'pct' },
+      { key: 'trend',        label: 'Trend',     bucketKey: 'momentum',   field: 'trend' },
+      { key: 'vol',          label: 'Vol vs Avg', bucketKey: 'volume',    field: 'vsAvg20d' },
+      { key: 'atr',          label: 'ATR',       bucketKey: 'volatility', field: 'atr' },
+      { key: 'expMove',      label: 'Exp Move',  bucketKey: 'volatility', field: 'expectedMove' },
+      { key: 'iv',           label: 'IV Rank',   bucketKey: 'volatility', field: 'ivRank' },
+      { key: 'days',         label: 'Days to Event', bucketKey: 'catalyst', field: 'daysToEvent', accent: 'urgent' },
+    ],
+    // tradePlan is on root of pick, not in a bucket — special columns
+    tradePlanColumns: [
+      { key: 'entry',   label: 'Entry',  path: 'tradePlan.entry' },
+      { key: 'stop',    label: 'Stop',   path: 'tradePlan.stop',    accent: 'bad' },
+      { key: 'target1', label: 'T1',     path: 'tradePlan.target1', accent: 'good' },
+      { key: 'target2', label: 'T2',     path: 'tradePlan.target2', accent: 'good' },
+      { key: 'rr',      label: 'R/R',    path: 'tradePlan.rrRatio' },
+    ],
   },
 
   dividend: {
@@ -99,6 +140,16 @@ export const STRATEGIES = {
         primary: ['payoutRatio', 'fcfCoverage'], all: ['payoutRatio', 'fcfCoverage', 'debtToEquity', 'cashCushion'] },
       { id: 'totalReturn',   label: 'Total Return',  weightLabel: '15%', color: 'text-amber-300',
         primary: ['valuationFair', 'capitalAppreciation'], all: ['valuationFair', 'capitalAppreciation', 'insiderActivity'] },
+    ],
+    tableColumns: [
+      { key: 'yield',        label: 'Yield',     bucketKey: 'yieldQuality',   field: 'currentYield', accent: 'good' },
+      { key: 'vsSector',     label: 'vs Sector', bucketKey: 'yieldQuality',   field: 'vsSectorAvg' },
+      { key: 'cagr',         label: '5y CAGR',   bucketKey: 'dividendGrowth', field: 'fiveYrCagr' },
+      { key: 'yearsRaised',  label: 'Yrs Raised', bucketKey: 'dividendGrowth', field: 'consecutiveYearsRaised' },
+      { key: 'status',       label: 'Status',    bucketKey: 'dividendGrowth', field: 'aristocratStatus' },
+      { key: 'payout',       label: 'Payout',    bucketKey: 'payoutSafety',   field: 'payoutRatio' },
+      { key: 'fcfCov',       label: 'FCF Cov',   bucketKey: 'payoutSafety',   field: 'fcfCoverage' },
+      { key: 'de',           label: 'D/E',       bucketKey: 'payoutSafety',   field: 'debtToEquity' },
     ],
   },
 };

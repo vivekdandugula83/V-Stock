@@ -93,8 +93,8 @@ export default function App() {
   // Aggregate per strategy for the active tab
   const activeStrategyData = strategyData[activeStrategy] || {};
   const agg = useMemo(
-    () => aggregate(activeStrategyData, activeIndustries),
-    [activeStrategyData, activeIndustries]
+    () => aggregate(activeStrategyData, activeIndustries, activeStrategy),
+    [activeStrategyData, activeIndustries, activeStrategy]
   );
 
   // Completion counts per strategy
@@ -481,9 +481,12 @@ export default function App() {
 
             {view === 'dashboard' && (
               <Dashboard
+                strategyId={activeStrategy}
                 aggregate={agg}
                 onSectorClick={scrollToSector}
                 onTickerClick={(t) => setDeepDiveTicker(t)}
+                watchlist={watchlist}
+                onToggleWatch={toggleWatch}
               />
             )}
 
