@@ -1,147 +1,143 @@
-import { TrendingUp, Activity, Calendar, ArrowUpRight, ArrowDownRight } from 'lucide-react';
+import { TrendingUp, TrendingDown, Minus, BarChart3 } from 'lucide-react';
+import SourceList from './SourceList.jsx';
 
-const regimeStyle = (r) => {
-  const x = (r || '').toLowerCase();
-  if (x.includes('on'))   return 'text-emerald-400 border-emerald-500/30 bg-emerald-500/10';
-  if (x.includes('off'))  return 'text-rose-400 border-rose-500/30 bg-rose-500/10';
-  if (x.includes('chop')) return 'text-amber-400 border-amber-500/30 bg-amber-500/10';
-  return 'text-sky-400 border-sky-500/30 bg-sky-500/10';
+const VAL_STYLES = {
+  cheap:     { ring: 'border-emerald-400/40', bg: 'bg-emerald-500/8',  text: 'text-emerald-300', icon: TrendingDown },
+  fair:      { ring: 'border-amber-400/30',   bg: 'bg-amber-500/8',    text: 'text-amber-300',   icon: Minus },
+  expensive: { ring: 'border-rose-400/40',    bg: 'bg-rose-500/8',     text: 'text-rose-300',    icon: TrendingUp },
+  mixed:     { ring: 'border-white/15',       bg: 'bg-white/[0.03]',   text: 'text-white/70',    icon: BarChart3 },
 };
 
-const changeStyle = (s) => {
-  if (!s) return 'text-stone-400';
-  if (String(s).includes('+')) return 'text-emerald-400';
-  if (String(s).includes('-')) return 'text-rose-400';
-  return 'text-stone-400';
+const SECTOR_RATING_STYLES = {
+  cheap:     'bg-emerald-500/15 text-emerald-200 border-emerald-400/30',
+  fair:      'bg-amber-500/15 text-amber-200 border-amber-400/30',
+  expensive: 'bg-rose-500/15 text-rose-200 border-rose-400/30',
 };
+
+function styleFor(v) {
+  const k = String(v || '').toLowerCase();
+  if (k.includes('cheap')) return VAL_STYLES.cheap;
+  if (k.includes('expensive')) return VAL_STYLES.expensive;
+  if (k.includes('fair')) return VAL_STYLES.fair;
+  return VAL_STYLES.mixed;
+}
+
+function sectorRatingStyle(r) {
+  const k = String(r || '').toLowerCase();
+  if (k.includes('cheap')) return SECTOR_RATING_STYLES.cheap;
+  if (k.includes('expensive')) return SECTOR_RATING_STYLES.expensive;
+  return SECTOR_RATING_STYLES.fair;
+}
+
+function formatAsOf(iso) {
+  if (!iso) return '';
+  try {
+    const d = new Date(iso);
+    const diffMs = Date.now() - d.getTime();
+    const diffMin = Math.floor(diffMs / 60000);
+    if (diffMin < 1) return 'just now';
+    if (diffMin < 60) return `${diffMin}m ago`;
+    const diffHr = Math.floor(diffMin / 60);
+    if (diffHr < 24) return `${diffHr}h ago`;
+    return d.toLocaleString();
+  } catch { return ''; }
+}
 
 export default function RegimeCard({ regime, fromCache }) {
   if (!regime) return null;
-  const r = regime;
-  const indices = r.indices || {};
-  const catalysts = Array.isArray(r.thisWeekCatalysts) ? r.thisWeekCatalysts : [];
+  const s = styleFor(regime?.marketValuation);
+  const Icon = s.icon;
+  const sectorVal = Array.isArray(regime?.sectorValuation) ? regime.sectorValuation : [];
+  const opps = Array.isArray(regime?.valueOpportunities) ? regime.valueOpportunities : [];
 
   return (
-    <section className="mb-8 p-6 sm:p-8 rounded-2xl border border-stone-800/80 bg-gradient-to-br from-stone-950/60 to-stone-900/30 slide-up">
-      <div className="flex items-start justify-between gap-4 flex-wrap mb-6">
-        <div>
-          <div className="mono text-[11px] tracking-[0.25em] uppercase text-stone-500 mb-2">
-            Market Briefing
-          </div>
-          <div className="display italic text-2xl sm:text-3xl text-stone-100 leading-snug max-w-3xl">
-            {r.regimeReason || r.marketSummary || 'Market context unavailable.'}
-          </div>
+    <div className={`rounded-xl border ${s.ring} ${s.bg} p-5 mb-6 slide-up`}>
+      <div className="flex items-start gap-3 mb-4 flex-wrap">
+        <div className={`w-12 h-12 rounded-lg ${s.bg} border ${s.ring} flex items-center justify-center flex-shrink-0`}>
+          <Icon size={20} className={s.text} />
         </div>
-        {r.regime && (
-          <div className="flex items-center gap-2">
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 flex-wrap mb-1">
+            <h3 className="display text-lg text-white">Market Valuation:</h3>
+            <span className={`display text-lg ${s.text}`}>{regime?.marketValuation || 'Mixed'}</span>
             {fromCache && (
-              <span className="px-2 py-1 rounded-full border text-[10px] mono tracking-wider uppercase text-stone-500 border-stone-700/60 bg-stone-900/40">
-                cached
+              <span className="text-[10px] uppercase text-white/40 px-2 py-0.5 rounded bg-white/5">cached</span>
+            )}
+            {regime?.asOf && (
+              <span className="text-[10px] text-white/35 mono ml-auto">
+                as of {formatAsOf(regime.asOf)}
               </span>
             )}
-            <div className={`px-3 py-1.5 rounded-full border text-xs mono tracking-wider uppercase ${regimeStyle(r.regime)}`}>
-              {r.regime}
-            </div>
           </div>
-        )}
+          {regime?.valuationReason && (
+            <p className="text-sm text-white/75 leading-relaxed">{regime.valuationReason}</p>
+          )}
+        </div>
       </div>
 
-      {Object.keys(indices).length > 0 && (
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-6">
-          {Object.entries(indices).map(([k, v]) => (
-            <div key={k} className="p-4 rounded-xl bg-stone-950/60 border border-stone-800/60">
-              <div className="mono text-[10px] tracking-widest uppercase text-stone-500 mb-1">{k}</div>
-              <div className="display text-2xl text-stone-100">{v?.level || '—'}</div>
-              <div className={`mono text-xs mt-1 ${changeStyle(v?.change)}`}>{v?.change || '—'}</div>
-            </div>
-          ))}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
+        <Metric label="S&P P/E" value={regime?.spxPe} />
+        <Metric label="Fwd P/E" value={regime?.spxForwardPe} />
+        <Metric label="Shiller CAPE" value={regime?.shillerCape} />
+        <Metric label="10-yr Yield" value={regime?.tenYear} />
+      </div>
+
+      {regime?.equityRiskPremium && (
+        <div className="mb-4 text-[11px] text-white/60">
+          <span className="text-white/40">Equity Risk Premium:</span> <span className="mono text-white/85">{regime.equityRiskPremium}</span>
         </div>
       )}
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-6">
-        {r.vix && (
-          <div className="p-4 rounded-xl bg-stone-950/60 border border-stone-800/60">
-            <div className="flex items-center gap-2 mb-1">
-              <Activity className="w-3.5 h-3.5 text-amber-400/70" />
-              <span className="mono text-[10px] tracking-widest uppercase text-stone-500">VIX</span>
-              <span className="mono text-sm text-stone-200 ml-auto">{r.vix.level || '—'}</span>
-            </div>
-            <div className="text-xs text-stone-400 leading-relaxed">{r.vix.interpretation || ''}</div>
-          </div>
-        )}
-        {r.rates && (
-          <div className="p-4 rounded-xl bg-stone-950/60 border border-stone-800/60">
-            <div className="flex items-center gap-2 mb-1">
-              <TrendingUp className="w-3.5 h-3.5 text-amber-400/70" />
-              <span className="mono text-[10px] tracking-widest uppercase text-stone-500">RATES & DOLLAR</span>
-            </div>
-            <div className="text-xs text-stone-400 leading-relaxed">
-              <span className="text-stone-200 mono">{r.rates.ten_year || '—'}</span> · {r.rates.dollar || '—'}
-              <div className="mt-1 text-stone-500">{r.rates.implication || ''}</div>
-            </div>
-          </div>
-        )}
-      </div>
-
-      {r.sectorRotation && (
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-6">
-          <div className="p-4 rounded-xl bg-emerald-950/15 border border-emerald-900/40">
-            <div className="flex items-center gap-2 mb-2">
-              <ArrowUpRight className="w-3.5 h-3.5 text-emerald-400" />
-              <span className="mono text-[10px] tracking-widest uppercase text-emerald-400/80">LEADING</span>
-            </div>
-            <ul className="space-y-1">
-              {(r.sectorRotation.leaders || []).map((s, i) => (
-                <li key={i} className="text-xs text-stone-300">▸ {s}</li>
-              ))}
-            </ul>
-          </div>
-          <div className="p-4 rounded-xl bg-rose-950/15 border border-rose-900/40">
-            <div className="flex items-center gap-2 mb-2">
-              <ArrowDownRight className="w-3.5 h-3.5 text-rose-400" />
-              <span className="mono text-[10px] tracking-widest uppercase text-rose-400/80">LAGGING</span>
-            </div>
-            <ul className="space-y-1">
-              {(r.sectorRotation.laggards || []).map((s, i) => (
-                <li key={i} className="text-xs text-stone-300">▸ {s}</li>
-              ))}
-            </ul>
+      {sectorVal.length > 0 && (
+        <div className="mb-4">
+          <div className="text-[10px] uppercase tracking-wider text-white/40 mb-2">Sector Valuation</div>
+          <div className="flex flex-wrap gap-2">
+            {sectorVal.map((sv, i) => (
+              <div key={i} className={`text-[11px] px-2 py-1 rounded border ${sectorRatingStyle(sv?.rating)}`}>
+                <span className="font-medium">{sv?.sector}</span>
+                <span className="opacity-70 ml-1.5 mono">P/E {sv?.pe}</span>
+                {sv?.vsHistorical && <span className="opacity-50 ml-1.5">({sv.vsHistorical})</span>}
+              </div>
+            ))}
           </div>
         </div>
       )}
 
-      {catalysts.length > 0 && (
-        <div className="p-4 rounded-xl bg-stone-950/60 border border-stone-800/60 mb-6">
-          <div className="flex items-center gap-2 mb-2">
-            <Calendar className="w-3.5 h-3.5 text-amber-400/70" />
-            <span className="mono text-[10px] tracking-widest uppercase text-stone-500">This week's catalysts</span>
-          </div>
-          <ul className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
-            {catalysts.map((c, i) => {
-              const text = typeof c === 'string' ? c : `${c.event || ''}${c.date ? ` · ${c.date}` : ''}`;
-              return (
-                <li key={i} className="text-xs text-stone-300 flex gap-2">
-                  <span className="text-amber-400/70">▸</span>
-                  <span>{text}</span>
-                </li>
-              );
-            })}
+      {regime?.insiderAggregate && (
+        <div className="mb-4 p-3 bg-violet-500/5 border border-violet-400/20 rounded-lg">
+          <div className="text-[10px] uppercase tracking-wider text-violet-300/80 mb-1">Aggregate Insider Activity</div>
+          <p className="text-sm text-white/80">{regime.insiderAggregate}</p>
+        </div>
+      )}
+
+      {opps.length > 0 && (
+        <div>
+          <div className="text-[10px] uppercase tracking-wider text-amber-300/80 mb-2">Value Opportunities</div>
+          <ul className="space-y-1">
+            {opps.map((o, i) => (
+              <li key={i} className="text-sm text-white/80 flex items-start gap-2">
+                <span className="text-amber-300/60 mt-1">•</span>
+                <span>{o}</span>
+              </li>
+            ))}
           </ul>
         </div>
       )}
 
-      {r.tradingPlaybook && (
-        <div className="p-5 rounded-xl bg-amber-950/15 border border-amber-900/40">
-          <div className="mono text-[10px] tracking-widest uppercase text-amber-400/80 mb-2">
-            Tactical playbook
-          </div>
-          <p className="text-sm text-amber-50/90 leading-relaxed display italic">{r.tradingPlaybook}</p>
+      {Array.isArray(regime?.sources) && regime.sources.length > 0 && (
+        <div className="mt-4 pt-3 border-t border-white/5">
+          <SourceList sources={regime.sources} compact label="Market sources" />
         </div>
       )}
+    </div>
+  );
+}
 
-      <div className="mono text-[10px] text-stone-600 tracking-wider mt-6">
-        AS OF {new Date(r.asOf || Date.now()).toLocaleString()}
-      </div>
-    </section>
+function Metric({ label, value }) {
+  return (
+    <div className="bg-white/[0.03] border border-white/10 rounded-lg p-2.5">
+      <div className="text-[10px] uppercase tracking-wider text-white/40">{label}</div>
+      <div className="mono text-sm text-white mt-1 truncate">{value || '—'}</div>
+    </div>
   );
 }

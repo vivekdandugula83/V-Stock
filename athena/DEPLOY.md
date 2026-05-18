@@ -1,62 +1,71 @@
-# Deploy V-Stock in 60 seconds
+# Deploy V-Stock
 
 ## Fastest: Netlify drag-and-drop
 
-1. Unzip `v-stock.zip` (or `v-stock-dist-only.zip`)
-2. Go to **https://app.netlify.com/drop**
-3. Drag the **`dist`** folder onto the page
+1. Unzip `v-stock-dist-only.zip` (or `v-stock.zip` for full repo)
+2. https://app.netlify.com/drop
+3. Drag the **`dist`** folder
 4. Open the URL Netlify gives you
-5. Paste your Anthropic API key — get one at **https://console.anthropic.com/settings/keys**
-6. Add at least **$10 in credits** at **https://console.anthropic.com/settings/billing** (V-Stock runs more API calls than v5 because of the daily movers + news pulse + 10 picks per sector)
-7. Hit **Deploy Agent**
+5. Paste your Anthropic API key — https://console.anthropic.com/settings/keys
+6. Add $5+ credits — https://console.anthropic.com/settings/billing
+7. **Leave tier on Tier 1** if your account is new
+8. Hit **Deploy Agent**
 
-## Six tabs after the run completes
+## Three views after the run
 
-- **Daily Movers** — top 50 stocks moving today, market heatmap, filters (gainers/losers/volume/news/earnings), search, mini-charts
-- **Research** — top 10 conviction picks ranked across all sectors
-- **Dark Signals** — smart-money leaderboard
-- **News Pulse** — political/macro/tech/policy briefing
-- **Overview** — dashboard with stats, sector heatmap, volatility scatter, catalysts
-- **By Sector** — 10 picks per sector with full detail
+- **Top Picks** — top 15 undervalued stocks across all sectors
+- **Dashboard** — avg P/E, growth, insider buying count, sector breakdown, valuation distribution
+- **By Sector** — full 10-pick value scan per sector with 4-bucket scoring
 
-## Click any ticker anywhere → deep-dive modal
+Click any ticker for a 12-month deep-dive (full valuation breakdown, SEC Form 4 transactions, balance sheet, bull/bear/base cases).
 
-Loads news, earnings, smart money, technicals, catalysts, risks, bull/base/bear cases, trade plan. Cached 10 min per ticker.
+## The composite scoring model
 
-## Costs to expect
+```
+Composite = Valuation (40%) + Growth (30%) + Insider (15%) + Volume (15%)
+```
 
-- **Express** (3 sectors, fewer searches): ~$0.30/run
-- **Standard** (6 sectors, default): ~$0.85/run
-- **Deep** (6 sectors, Sonnet): ~$2.40/run
+- Valuation: P/E, Forward P/E, PEG, P/B, EV/EBITDA, vs sector median
+- Growth: Revenue YoY + 5yr CAGR, EPS YoY + 5yr CAGR, margins, ROE
+- Insider: Net direction last 6 months from SEC Form 4 filings
+- Volume: 20d avg, current vs avg, trend, liquidity grade
 
-Each on-demand ticker deep-dive: ~$0.05–0.10.
+Verdicts: ≥80 Deep Value · 65-79 Undervalued · 50-64 Fair · <50 Overvalued
 
-The session spend meter at the top tracks actual usage from API responses — not estimates.
+## Cost
 
-## Alternative: deploy via Git
+| Mode | 6 sectors |
+|------|-----------|
+| Express | ~$0.20 |
+| Standard | ~$0.55 |
+| Deep | ~$1.80 |
+
+Plus ~$0.05-0.10 per ticker deep-dive.
+
+The spend meter at the top shows actual usage from API responses.
+
+## Git deploy
 
 ```bash
 unzip v-stock.zip
 cd athena
-git remote add origin <your-github-or-gitlab-repo-url>
+git remote add origin <your-repo-url>
 git push -u origin main
 ```
 
-In Netlify dashboard → **Add new site → Import existing project** → pick your repo. The `netlify.toml` configures everything.
+Netlify dashboard → **Add new site → Import from Git**. `netlify.toml` is preconfigured.
 
-## Run locally
+## Local dev
 
 ```bash
 cd athena
 npm install
-npm run dev
-# http://localhost:5173
+npm run dev   # localhost:5173
 ```
 
-## If something breaks
+## Troubleshooting
 
-- **Black screen** → ErrorBoundary catches React crashes. If it still goes black, F12 → Console → copy the first red error.
-- **"Credit balance too low"** → meter shows banner with billing link. Add credits.
-- **"CORS error" / 403** → enable "Allow browser direct access" on your API key in Console.
-- **Daily movers parse error** → 50 picks is a big response; switch to Express mode if it keeps failing.
-- **Sector fails individually** → click Retry on that sector card; v6 doesn't crash the whole app.
+- **Black screen** → F12 → Console → copy first red error
+- **"Credit balance too low"** → meter banner links to billing
+- **"Rate limited"** → automatic retry; live queue status shows countdown
+- **Sector parse error** → click Retry on that sector
