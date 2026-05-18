@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { MessageSquare, X, Send, Sparkles, Loader2, Square, Globe } from 'lucide-react';
 import { streamChat, buildAdvisorSystemPrompt } from '../lib/advisor.js';
+import { stripCitations } from '../lib/agent.js';
 
 const STORAGE_KEY = 'vstock_advisor_history_v1';
 const MAX_HISTORY = 30;
@@ -280,8 +281,11 @@ function Message({ message, onTickerClick, isLast }) {
 // preserve paragraph breaks, light markdown for bold/italics.
 function FormattedContent({ text, onTickerClick }) {
   if (!text) return null;
-  // Split into paragraphs
-  const paragraphs = text.split(/\n\n+/);
+  // Strip Claude grounding citation tags ( etc.) before display.
+  // Done at render time so partial tags during streaming are also hidden cleanly.
+  const cleaned = stripCitations(text);
+  if (!cleaned) return null;
+  const paragraphs = cleaned.split(/\n\n+/);
   return (
     <div className="space-y-2 whitespace-pre-wrap break-words">
       {paragraphs.map((p, i) => (

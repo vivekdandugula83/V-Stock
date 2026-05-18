@@ -278,11 +278,14 @@ async function callClaude(apiKey, prompt, mode, maxTokens, maxUses) {
 //   <cite index="...">text</cite>
 //   text
 //   raw fragments like 'ite index="2-1">'  (from broken/escaped tags)
-function stripCitations(text) {
+//   partial tags during streaming (open tag at end of buffer, no closing >)
+export function stripCitations(text) {
   if (typeof text !== 'string') return text;
   return text
     // Full well-formed tags — keep inner content, drop tags
     .replace(/<\/?(?:antml:)?cite[^>]*>/gi, '')
+    // Partial open tag at the end of a streaming buffer (no closing `>` yet)
+    .replace(/<\/?(?:antml:)?cite\b[^>]*$/gi, '')
     // Half-broken fragments left over from escaping/rendering bugs
     .replace(/\bite\s+index\s*=\s*"[^"]*"\s*>/gi, '')
     .replace(/<\/?\s*ite[^>]*>/gi, '')
