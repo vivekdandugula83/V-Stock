@@ -414,6 +414,16 @@ function normalizePicks(rawPicks) {
         ? p.sources.filter((s) => typeof s === 'string' && s.startsWith('http')).slice(0, 8)
         : [];
       const catalysts = Array.isArray(p?.catalysts) ? p.catalysts.slice(0, 5) : [];
+      const recommendation = p?.recommendation || deriveRec(p?.verdict);
+      const prediction = p?.prediction ? {
+        target12mo: p.prediction.target12mo || null,
+        targetLow: p.prediction.targetLow || null,
+        targetHigh: p.prediction.targetHigh || null,
+        upsidePct: p.prediction.upsidePct || null,
+        horizon: p.prediction.horizon || '12 months',
+        confidence: p.prediction.confidence || 'Medium',
+        rationale: p.prediction.rationale || null,
+      } : null;
       const normalized = {
         rank: p?.rank ?? (i + 1),
         ticker: p?.ticker || '?',
@@ -429,6 +439,9 @@ function normalizePicks(rawPicks) {
         financialStrength,
         institutional,
         thesis: p?.thesis || '',
+        recommendation,
+        recommendationReason: p?.recommendationReason || null,
+        prediction,
         catalysts,
         risks: Array.isArray(p?.risks) ? p.risks : [],
         sources,
@@ -451,6 +464,16 @@ function clampScore(n) {
   const x = Number(n);
   if (!Number.isFinite(x)) return 0;
   return Math.max(0, Math.min(100, Math.round(x)));
+}
+
+// Derive a recommendation from verdict if model didn't supply one
+function deriveRec(verdict) {
+  const v = String(verdict || '').toLowerCase();
+  if (v.includes('deep value') || v.includes('strong setup') || v.includes('prime setup') || v.includes('income anchor')) return 'Strong Buy';
+  if (v.includes('undervalued') || v === 'setup' || v.includes('solid setup') || v.includes('stable yield')) return 'Buy';
+  if (v.includes('fair') || v.includes('watch')) return 'Hold';
+  if (v.includes('overvalued') || v.includes('avoid') || v.includes('yield trap')) return 'Sell';
+  return 'Hold';
 }
 
 export async function fetchMarketRegime(apiKey, { horizon, risk, mode }) {
@@ -652,6 +675,18 @@ Return ONLY this JSON (no markdown, no preamble):
 
       "compositeScore": 82,
       "verdict": "Deep Value" | "Undervalued" | "Fair Value" | "Overvalued",
+      "recommendation": "Strong Buy" | "Buy" | "Hold" | "Sell" | "Strong Sell",
+      "recommendationReason": "1 sentence explaining the rec based on the analysis",
+
+      "prediction": {
+        "target12mo": "$145",
+        "targetLow": "$130",
+        "targetHigh": "$165",
+        "upsidePct": "+18%",
+        "horizon": "12 months",
+        "confidence": "High" | "Medium" | "Low",
+        "rationale": "1-2 sentences: what gets the stock to the target — P/E re-rating, earnings growth, margin expansion, etc"
+      },
 
       "thesis": "3-4 sentences: WHY this is undervalued. What is the market missing? What catalyst could re-rate the valuation? Reference specific numbers.",
 
@@ -678,6 +713,9 @@ CRITICAL:
 - The "sources" array MUST contain actual URLs you used during web_search — at least 3 per pick
 - Each score 0-100. Composite = valuation × 0.40 + growth × 0.30 + insider × 0.15 + volume × 0.15 (institutional is informational only, NOT scored into composite)
 - Verdict: ≥80 Deep Value; 65-79 Undervalued; 50-64 Fair; <50 Overvalued
+- Recommendation mapping: Deep Value → Strong Buy or Buy · Undervalued → Buy · Fair → Hold · Overvalued → Sell or Strong Sell. The "recommendation" should align with verdict and your thesis.
+- For "prediction.target12mo", base it on realistic P/E re-rating + projected earnings. Be conservative — typical 12mo upside in value names is 10-30%. For deep value with strong catalysts, 30-50%. Be honest.
+- Confidence: High = clear catalyst + strong moat + insider buying; Medium = decent setup; Low = speculative.
 - Rank picks by compositeScore descending
 - Exactly 10 picks. priceHistory 20 numbers most-recent-last (use [] if unavailable).
 - For "institutional" — if data is paywalled or unavailable, set dataAvailability="Limited" and use "No data" / "Unknown" rather than guessing.`;
@@ -699,44 +737,47 @@ CRITICAL:
 }
 
 // ============================================================
-// STRATEGY DISPATCHER — Day Trade, Swing, Dividend
-// Value uses fetchIndustryPicks (above); these use the strategy-specific
-// prompts and normalizers defined in lib/strategies.js.
+// CATEGORY DISPATCHER — ONE call per category returns 10 picks total
+// All categories share the same 4-bucket scoring (Valuation × 40% +
+// Growth × 30% + Insider × 15% + Volume × 15%). Different categories
+// differ only in stock selection criteria.
 // ============================================================
-import { STRATEGIES, buildStrategyPrompt, normalizeStrategyPicks } from './strategies.js';
+import { CATEGORIES, buildCategoryPrompt, normalizeCategoryPicks } from './strategies.js';
 
-export async function fetchStrategyPicks(apiKey, strategyId, industryId, { mode }) {
-  const ind = INDUSTRIES.find((i) => i.id === industryId);
-  if (!ind) throw new ApiError(KNOWN_ERROR_KINDS.UNKNOWN, `Unknown industry: ${industryId}`);
-  const s = STRATEGIES[strategyId];
-  if (!s) throw new ApiError(KNOWN_ERROR_KINDS.UNKNOWN, `Unknown strategy: ${strategyId}`);
-
-  // Value goes through the original fetcher (with its dedicated normalizer)
-  if (strategyId === 'value') {
-    return fetchIndustryPicks(apiKey, industryId, { horizon: 'position', risk: 'moderate', regime: null, mode });
-  }
-
+export async function fetchCategoryPicks(apiKey, categoryId, { mode }) {
+  const cat = CATEGORIES[categoryId];
+  if (!cat) throw new ApiError(KNOWN_ERROR_KINDS.UNKNOWN, `Unknown category: ${categoryId}`);
   const m = MODES[mode];
   const today = new Date().toDateString();
-  const prompt = buildStrategyPrompt(strategyId, ind.label, {
+  // Each category uses a bit more search budget since we're scanning ALL sectors at once
+  const maxSearches = Math.max(m.industrySearches + 1, 4);
+
+  const prompt = buildCategoryPrompt(categoryId, {
     today,
-    maxSearches: m.industrySearches,
+    maxSearches,
     sourceGuidance: SOURCE_GUIDANCE,
   });
 
-  const { parsed, usage } = await callClaude(apiKey, prompt, mode, m.industryTokens, m.industrySearches);
+  const tokenBudget = Math.max(m.industryTokens, 6000); // Need more room for 10 picks + recommendation + prediction
+  const { parsed, usage } = await callClaude(apiKey, prompt, mode, tokenBudget, maxSearches);
+
   return {
     data: {
-      industry: parsed?.industry || ind.label,
-      industryNotes: parsed?.industryNotes || '',
-      industrySources: Array.isArray(parsed?.industrySources)
-        ? parsed.industrySources.filter((u) => typeof u === 'string' && u.startsWith('http')).slice(0, 6)
+      category: parsed?.category || cat.label,
+      categoryNotes: parsed?.categoryNotes || '',
+      sources: Array.isArray(parsed?.sources)
+        ? parsed.sources.filter((u) => typeof u === 'string' && u.startsWith('http')).slice(0, 8)
         : [],
-      picks: normalizeStrategyPicks(strategyId, parsed?.picks),
+      picks: normalizeCategoryPicks(categoryId, parsed?.picks),
     },
     usage,
   };
 }
+
+// Legacy compatibility — keep fetchStrategyPicks as alias of fetchCategoryPicks
+// (App.jsx old code may still reference it during refactor; remove later)
+export const fetchStrategyPicks = (apiKey, categoryId, _industryId, opts) =>
+  fetchCategoryPicks(apiKey, categoryId, opts);
 
 // ============================================================
 // DAILY MOVERS — top 50 stocks by daily momentum, mixed sectors

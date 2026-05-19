@@ -1,20 +1,20 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
 import {
-  AlertTriangle, Loader2, Sparkles, Eye, Key, Lock,
-  DollarSign, Gauge, LayoutDashboard, ListTree, Target, Zap, Filter,
+  Loader2, Sparkles, Eye, Key, Lock,
+  DollarSign, Gauge, LayoutDashboard, Target, Zap, Filter,
+  TrendingUp, Activity, AlertCircle,
 } from 'lucide-react';
 
 import {
-  INDUSTRIES, MODES, estimateCost,
-  fetchMarketRegime, fetchStrategyPicks,
+  MODES, estimateCost,
+  fetchMarketRegime, fetchCategoryPicks,
   loadCachedRegime, saveCachedRegime,
 } from './lib/agent';
-import { STRATEGIES, STRATEGY_IDS } from './lib/strategies';
+import { CATEGORIES, CATEGORY_IDS } from './lib/strategies';
 import { RateLimitQueue, TIERS } from './lib/queue';
-import { aggregate } from './lib/aggregate';
 import { recordUsage } from './lib/usage';
 import RegimeCard from './components/RegimeCard';
-import { StrategySection, StrategyTopPicks } from './components/StrategyViews';
+import CategoryPickCard from './components/CategoryPickCard';
 import Dashboard from './components/Dashboard';
 import ApiError from './components/ApiError';
 import UsageMeter from './components/UsageMeter';
@@ -22,11 +22,13 @@ import TickerDeepDive from './components/TickerDeepDive';
 import WatchlistPanel from './components/WatchlistPanel';
 import QueueStatus from './components/QueueStatus';
 import AdvisorChat from './components/AdvisorChat';
-import StrategyTabs from './components/StrategyTabs';
+import SourceList from './components/SourceList';
 
 const KEY_STORAGE = 'vstock_anthropic_key';
-const PREF_STORAGE = 'vstock_prefs_v7';
-const WATCHLIST_STORAGE = 'vstock_watchlist_v7';
+const PREF_STORAGE = 'vstock_prefs_v8';
+const WATCHLIST_STORAGE = 'vstock_watchlist_v8';
+
+const ICON_MAP = { TrendingUp, Activity, Zap, DollarSign };
 
 function loadPrefs() { try { return JSON.parse(localStorage.getItem(PREF_STORAGE) || '{}'); } catch { return {}; } }
 function savePrefs(p) { try { localStorage.setItem(PREF_STORAGE, JSON.stringify(p)); } catch {} }
@@ -38,22 +40,18 @@ export default function App() {
   const initial = loadPrefs();
   const [mode, setMode] = useState(initial.mode || 'standard');
   const [tier, setTier] = useState(initial.tier || 'tier1');
-  const [selectedInd, setSelectedInd] = useState(initial.selectedInd || INDUSTRIES.map((i) => i.id));
-  const [enabledStrategies, setEnabledStrategies] = useState(initial.enabledStrategies || ['value', 'swing', 'daytrade', 'dividend']);
-  const [activeStrategy, setActiveStrategy] = useState(initial.activeStrategy || 'value');
-  const [view, setView] = useState(initial.view || 'top');
+  const [enabledCategories, setEnabledCategories] = useState(initial.enabledCategories || ['longterm', 'swing', 'daytrade', 'dividend']);
+  const [activeCategory, setActiveCategory] = useState(initial.activeCategory || 'longterm');
+  const [view, setView] = useState(initial.view || 'list');
 
   const queueRef = useRef(null);
   const [activeQueue, setActiveQueue] = useState(null);
-
   const [running, setRunning] = useState(false);
   const [regime, setRegime] = useState(null);
   const [regimeError, setRegimeError] = useState(null);
   const [regimeFromCache, setRegimeFromCache] = useState(false);
-
-  // strategyData[strategyId][sectorId] = { status, data, error }
-  const [strategyData, setStrategyData] = useState({});
-
+  // categoryData[categoryId] = { status, data, error }
+  const [categoryData, setCategoryData] = useState({});
   const [usageRefresh, setUsageRefresh] = useState(0);
   const [deepDiveTicker, setDeepDiveTicker] = useState(null);
   const [watchlist, setWatchlist] = useState(() => {
@@ -62,15 +60,14 @@ export default function App() {
 
   useEffect(() => { try { localStorage.setItem(WATCHLIST_STORAGE, JSON.stringify(watchlist)); } catch {} }, [watchlist]);
   useEffect(() => {
-    savePrefs({ mode, selectedInd, view, tier, enabledStrategies, activeStrategy });
-  }, [mode, selectedInd, view, tier, enabledStrategies, activeStrategy]);
+    savePrefs({ mode, view, tier, enabledCategories, activeCategory });
+  }, [mode, view, tier, enabledCategories, activeCategory]);
 
-  // If active strategy gets disabled, fall back to first enabled
   useEffect(() => {
-    if (!enabledStrategies.includes(activeStrategy) && enabledStrategies.length > 0) {
-      setActiveStrategy(enabledStrategies[0]);
+    if (!enabledCategories.includes(activeCategory) && enabledCategories.length > 0) {
+      setActiveCategory(enabledCategories[0]);
     }
-  }, [enabledStrategies, activeStrategy]);
+  }, [enabledCategories, activeCategory]);
 
   const toggleWatch = (ticker) => {
     if (!ticker) return;
@@ -80,57 +77,48 @@ export default function App() {
     recordUsage(usage, modeKey, label);
     setUsageRefresh((n) => n + 1);
   };
-  const activeIndustries = INDUSTRIES.filter((i) => selectedInd.includes(i.id));
-  const toggleIndustry = (id) =>
-    setSelectedInd((p) => (p.includes(id) ? p.filter((x) => x !== id) : [...p, id]));
-  const toggleStrategy = (id) =>
-    setEnabledStrategies((p) => (p.includes(id) ? p.filter((x) => x !== id) : [...p, id]));
+  const toggleCategory = (id) =>
+    setEnabledCategories((p) => (p.includes(id) ? p.filter((x) => x !== id) : [...p, id]));
 
-  // Total scans = strategies × sectors  +  1 (regime)
-  const totalCalls = enabledStrategies.length * activeIndustries.length + 1;
-  const cost = estimateCost(mode, enabledStrategies.length * activeIndustries.length);
+  // 4 API calls = 4 categories + 1 regime
+  const totalCalls = enabledCategories.length + 1;
+  // Cost estimate: each category call is heavier (more searches, bigger output)
+  const cost = enabledCategories.reduce((sum) => sum + (MODES[mode]?.regimeTokens ? 0.10 : 0.05), 0)
+             + 0.05; // approximate
 
-  // Aggregate per strategy for the active tab
-  const activeStrategyData = strategyData[activeStrategy] || {};
-  const agg = useMemo(
-    () => aggregate(activeStrategyData, activeIndustries, activeStrategy),
-    [activeStrategyData, activeIndustries, activeStrategy]
-  );
+  const activeData = categoryData[activeCategory] || null;
+  const activePicks = activeData?.data?.picks || [];
+  const activeSources = activeData?.data?.sources || [];
 
-  // Completion counts per strategy
-  const completionByStrategy = useMemo(() => {
-    const out = {};
-    for (const sid of STRATEGY_IDS) {
-      const data = strategyData[sid] || {};
-      let done = 0;
-      let total = 0;
-      for (const ind of activeIndustries) {
-        if (!data[ind.id]) continue;
-        total++;
-        if (data[ind.id].status === 'done') done++;
-      }
-      out[sid] = { done, total: enabledStrategies.includes(sid) ? activeIndustries.length : 0 };
+  // Cross-category combined picks (for advisor)
+  const allLoadedPicks = useMemo(() => {
+    const out = [];
+    for (const cid of CATEGORY_IDS) {
+      const d = categoryData[cid]?.data;
+      if (!d?.picks) continue;
+      for (const p of d.picks) out.push({ ...p, categoryId: cid });
     }
     return out;
-  }, [strategyData, activeIndustries, enabledStrategies]);
+  }, [categoryData]);
 
-  const completedCount = Object.values(activeStrategyData).filter((v) => v.status === 'done').length;
-  const errorCount = Object.values(activeStrategyData).filter((v) => v.status === 'error').length;
-  const loadingCount = Object.values(activeStrategyData).filter((v) => v.status === 'loading' || v.status === 'pending').length;
-  const hasResults = regime || Object.keys(strategyData).some((sid) =>
-    Object.values(strategyData[sid] || {}).some((v) => v.status === 'done')
-  );
+  const completion = useMemo(() => {
+    const out = {};
+    for (const cid of CATEGORY_IDS) {
+      const status = categoryData[cid]?.status;
+      out[cid] = status === 'done' ? 'done' : status === 'loading' ? 'loading' : status === 'error' ? 'error' : 'pending';
+    }
+    return out;
+  }, [categoryData]);
 
+  const hasResults = regime || Object.values(categoryData).some((d) => d?.status === 'done');
   const fatalError = useMemo(() => {
     if (regimeError && (regimeError.kind === 'credit' || regimeError.kind === 'auth')) return regimeError;
-    for (const sid of Object.keys(strategyData)) {
-      for (const id of Object.keys(strategyData[sid] || {})) {
-        const err = strategyData[sid][id]?.error;
-        if (err && (err.kind === 'credit' || err.kind === 'auth')) return err;
-      }
+    for (const cid of Object.keys(categoryData)) {
+      const err = categoryData[cid]?.error;
+      if (err && (err.kind === 'credit' || err.kind === 'auth')) return err;
     }
     return null;
-  }, [regimeError, strategyData]);
+  }, [regimeError, categoryData]);
 
   const saveKey = () => {
     const t = apiKey.trim();
@@ -142,16 +130,11 @@ export default function App() {
     }
   };
 
-  const setSectorState = (strategyId, sectorId, val) =>
-    setStrategyData((prev) => ({
-      ...prev,
-      [strategyId]: { ...(prev[strategyId] || {}), [sectorId]: val },
-    }));
+  const setCategoryState = (cid, val) => setCategoryData((prev) => ({ ...prev, [cid]: val }));
 
   const runAgent = async (forceRegimeRefresh = false) => {
     if (!apiKey) { setKeyEditing(true); return; }
-    if (activeIndustries.length === 0) { alert('Select at least one sector.'); return; }
-    if (enabledStrategies.length === 0) { alert('Enable at least one strategy.'); return; }
+    if (enabledCategories.length === 0) { alert('Enable at least one category.'); return; }
 
     const tierCfg = TIERS[tier] || TIERS.tier1;
     const queue = new RateLimitQueue({
@@ -166,18 +149,11 @@ export default function App() {
     setRegime(null);
     setRegimeError(null);
     setRegimeFromCache(false);
+    setCategoryData(Object.fromEntries(
+      enabledCategories.map((cid) => [cid, { status: 'pending', data: null, error: null }])
+    ));
 
-    // Initialize all enabled strategy × sector slots as pending
-    const initial = {};
-    for (const sid of enabledStrategies) {
-      initial[sid] = {};
-      for (const ind of activeIndustries) {
-        initial[sid][ind.id] = { status: 'pending', data: null, error: null };
-      }
-    }
-    setStrategyData(initial);
-
-    // 1. Market regime (run once)
+    // 1. Market regime
     let regimeResult = forceRegimeRefresh ? null : loadCachedRegime(mode, 'moderate', 'position');
     if (regimeResult) {
       setRegime(regimeResult);
@@ -196,59 +172,44 @@ export default function App() {
         setRegimeError(err);
         if (err.kind === 'credit' || err.kind === 'auth') {
           queue.drain();
-          for (const sid of enabledStrategies)
-            for (const ind of activeIndustries)
-              setSectorState(sid, ind.id, { status: 'error', data: null, error: err });
+          for (const cid of enabledCategories)
+            setCategoryState(cid, { status: 'error', data: null, error: err });
           setRunning(false);
           return;
         }
       }
     }
 
-    // 2. For each strategy × each sector, queue a scan
-    const allPromises = [];
-    for (const strategyId of enabledStrategies) {
-      for (const ind of activeIndustries) {
-        setSectorState(strategyId, ind.id, { status: 'loading', data: null, error: null });
-        const label = `${STRATEGIES[strategyId]?.short || strategyId}/${ind.short}`;
-        allPromises.push(
-          queue.add(() => fetchStrategyPicks(apiKey, strategyId, ind.id, { mode }), label)
-            .then(({ data, usage }) => {
-              recordUsageAndRefresh(usage, mode, label);
-              setSectorState(strategyId, ind.id, { status: 'done', data, error: null });
-            })
-            .catch((err) => {
-              setSectorState(strategyId, ind.id, { status: 'error', data: null, error: err });
-              if (err.kind === 'credit' || err.kind === 'auth') queue.drain();
-            })
-        );
-      }
-    }
+    // 2. One call per category — each returns 10 picks
+    const promises = enabledCategories.map((cid) => {
+      setCategoryState(cid, { status: 'loading', data: null, error: null });
+      return queue.add(() => fetchCategoryPicks(apiKey, cid, { mode }), CATEGORIES[cid]?.short || cid)
+        .then(({ data, usage }) => {
+          recordUsageAndRefresh(usage, mode, cid);
+          setCategoryState(cid, { status: 'done', data, error: null });
+        })
+        .catch((err) => {
+          setCategoryState(cid, { status: 'error', data: null, error: err });
+          if (err.kind === 'credit' || err.kind === 'auth') queue.drain();
+        });
+    });
 
-    await Promise.allSettled(allPromises);
+    await Promise.allSettled(promises);
     setRunning(false);
     setActiveQueue(null);
   };
 
-  const retrySector = async (strategyId, industryId) => {
+  const retryCategory = async (cid) => {
     if (!apiKey) return;
-    setSectorState(strategyId, industryId, { status: 'loading', data: null, error: null });
+    setCategoryState(cid, { status: 'loading', data: null, error: null });
     const tierCfg = TIERS[tier] || TIERS.tier1;
     const q = new RateLimitQueue({ concurrency: 1, minSpacingMs: tierCfg.minSpacingMs, maxRetries: 4 });
     try {
-      const { data, usage } = await q.add(() => fetchStrategyPicks(apiKey, strategyId, industryId, { mode }), 'retry');
-      recordUsageAndRefresh(usage, mode, `${strategyId}/retry`);
-      setSectorState(strategyId, industryId, { status: 'done', data, error: null });
+      const { data, usage } = await q.add(() => fetchCategoryPicks(apiKey, cid, { mode }), 'retry');
+      recordUsageAndRefresh(usage, mode, `${cid}/retry`);
+      setCategoryState(cid, { status: 'done', data, error: null });
     } catch (err) {
-      setSectorState(strategyId, industryId, { status: 'error', data: null, error: err });
-    }
-  };
-
-  const scrollToSector = (id) => {
-    const el = document.getElementById(`sector-${activeStrategy}-${id}`);
-    if (el) {
-      setView('industries');
-      setTimeout(() => el.scrollIntoView({ behavior: 'smooth', block: 'start' }), 100);
+      setCategoryState(cid, { status: 'error', data: null, error: err });
     }
   };
 
@@ -260,14 +221,15 @@ export default function App() {
           <div className="flex items-center gap-2 mb-3">
             <Sparkles className="w-3 h-3 text-amber-400" />
             <span className="mono text-[11px] tracking-[0.25em] uppercase text-amber-300/80">
-              Multi-Strategy Stock Intelligence
+              4 Categories · 10 Picks Each · Unified Scoring
             </span>
           </div>
           <h1 className="display text-5xl sm:text-7xl font-light leading-[0.95] tracking-tight mb-4">
             <span className="shimmer-text italic">V-Stock</span>
           </h1>
           <p className="text-stone-400 text-base sm:text-lg max-w-2xl leading-relaxed">
-            Four strategies, one dashboard. Long-term value · swing setups · day trades · dividend income — each with its own scoring model, 10 picks per sector.
+            Same 4-bucket scoring across all categories: <strong className="text-amber-200">Valuation 40%</strong> · <strong className="text-emerald-200">Growth 30%</strong> · <strong className="text-violet-200">Insider 15%</strong> · <strong className="text-cyan-200">Volume 15%</strong>.
+            Each category picks 10 stocks fit for its horizon with explicit recommendation + 12-month prediction + sources.
           </p>
         </header>
 
@@ -305,90 +267,73 @@ export default function App() {
 
         {/* CONTROLS */}
         <div className="mb-6 p-5 rounded-xl border border-stone-800 bg-stone-950/60">
+          {/* Category selector — visual chips */}
           <div className="flex items-center gap-2 mb-3">
             <Filter className="w-3.5 h-3.5 text-stone-400" />
-            <span className="mono text-[10px] tracking-[0.2em] uppercase text-stone-400">Strategies ({enabledStrategies.length}/4)</span>
+            <span className="mono text-[10px] tracking-[0.2em] uppercase text-stone-400">Categories ({enabledCategories.length}/4)</span>
           </div>
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 mb-4">
-            {Object.values(STRATEGIES).map((s) => {
-              const enabled = enabledStrategies.includes(s.id);
+            {Object.values(CATEGORIES).map((c) => {
+              const enabled = enabledCategories.includes(c.id);
+              const Icon = ICON_MAP[c.icon] || TrendingUp;
               return (
-                <button key={s.id} onClick={() => toggleStrategy(s.id)} disabled={running}
+                <button key={c.id} onClick={() => toggleCategory(c.id)} disabled={running}
                   className={`text-left p-3 rounded-lg border transition disabled:opacity-50 ${
                     enabled
                       ? 'border-amber-400/60 bg-amber-500/10'
                       : 'border-stone-800 bg-stone-900/40 hover:border-stone-700'
                   }`}>
-                  <div className={`display text-base mb-1 ${enabled ? 'text-amber-200' : 'text-stone-400'}`}>{s.label}</div>
-                  <div className="mono text-[10px] text-stone-500 leading-snug">{s.description}</div>
+                  <div className="flex items-center gap-2 mb-1">
+                    <Icon size={13} style={{ color: enabled ? c.color : '#737373' }} />
+                    <div className={`display text-base ${enabled ? 'text-amber-200' : 'text-stone-400'}`}>{c.label}</div>
+                  </div>
+                  <div className="mono text-[10px] text-stone-500 leading-snug">{c.horizon}</div>
                 </button>
               );
             })}
           </div>
 
-          <div className="flex items-center gap-2 mb-3">
-            <Gauge className="w-3.5 h-3.5 text-stone-400" />
-            <span className="mono text-[10px] tracking-[0.2em] uppercase text-stone-400">Scan Depth</span>
-          </div>
-          <div className="grid grid-cols-3 gap-2 mb-4">
-            {Object.entries(MODES).map(([key, m]) => {
-              const active = mode === key;
-              return (
-                <button key={key} onClick={() => setMode(key)} disabled={running}
-                  className={`text-left p-3 rounded-lg border transition disabled:opacity-50 ${
-                    active ? 'border-amber-400/60 bg-amber-500/10 ring-1 ring-amber-400/30'
-                           : 'border-stone-800 bg-stone-900/40 hover:border-stone-700'
-                  }`}>
-                  <div className={`display text-base mb-1 ${active ? 'text-amber-200' : 'text-stone-200'}`}>{m.label}</div>
-                  <div className="mono text-[10px] text-stone-500 leading-snug">{m.description}</div>
-                </button>
-              );
-            })}
-          </div>
-
-          <div className="mb-6 p-3 rounded-lg border border-amber-900/30 bg-amber-950/10">
-            <div className="flex items-center gap-2 mb-2">
-              <Zap className="w-3.5 h-3.5 text-amber-400/80" />
-              <span className="mono text-[10px] tracking-[0.2em] uppercase text-stone-400">API Tier</span>
-              <a href="https://console.anthropic.com/settings/limits" target="_blank" rel="noreferrer"
-                 className="text-[10px] text-stone-500 underline hover:text-amber-300 ml-auto">Check your tier →</a>
+          {/* Mode + tier compact */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-2">
+            <div>
+              <div className="flex items-center gap-2 mb-2">
+                <Gauge className="w-3.5 h-3.5 text-stone-400" />
+                <span className="mono text-[10px] tracking-[0.2em] uppercase text-stone-400">Depth</span>
+              </div>
+              <div className="grid grid-cols-3 gap-2">
+                {Object.entries(MODES).map(([key, m]) => {
+                  const active = mode === key;
+                  return (
+                    <button key={key} onClick={() => setMode(key)} disabled={running}
+                      className={`text-center p-2 rounded-lg border transition disabled:opacity-50 ${
+                        active ? 'border-amber-400/60 bg-amber-500/10' : 'border-stone-800 bg-stone-900/40 hover:border-stone-700'
+                      }`}>
+                      <div className={`display text-sm ${active ? 'text-amber-200' : 'text-stone-300'}`}>{m.label}</div>
+                    </button>
+                  );
+                })}
+              </div>
             </div>
-            <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
-              {Object.entries(TIERS).map(([key, t]) => {
-                const active = tier === key;
-                return (
-                  <button key={key} onClick={() => setTier(key)} disabled={running}
-                    className={`text-left p-2 rounded border transition disabled:opacity-50 ${
-                      active ? 'border-amber-400/60 bg-amber-500/10' : 'border-stone-800 bg-stone-900/40 hover:border-stone-700'
-                    }`}>
-                    <div className={`text-[11px] font-medium ${active ? 'text-amber-200' : 'text-stone-300'}`}>{t.label}</div>
-                    <div className="text-[9px] text-stone-500 leading-snug mt-0.5">{t.description}</div>
-                  </button>
-                );
-              })}
-            </div>
-            <div className="text-[10px] text-stone-500 mt-2">
-              On Tier 1 with all 4 strategies × 6 sectors = 24 calls. Expect ~5-10 minutes per run.
-            </div>
-          </div>
-
-          <div className="mb-2">
-            <div className="flex items-center gap-2 mb-2">
-              <span className="mono text-[10px] tracking-[0.2em] uppercase text-stone-400">Sectors ({selectedInd.length} of {INDUSTRIES.length})</span>
-            </div>
-            <div className="flex flex-wrap gap-1.5">
-              {INDUSTRIES.map((ind) => {
-                const active = selectedInd.includes(ind.id);
-                return (
-                  <button key={ind.id} onClick={() => toggleIndustry(ind.id)} disabled={running}
-                    className={`text-xs px-2.5 py-1 rounded-md border transition disabled:opacity-50 ${
-                      active ? 'bg-amber-400/15 border-amber-400/40 text-amber-200'
-                             : 'bg-stone-900/40 border-stone-800 text-stone-400 hover:border-stone-700'
-                    }`}>
-                    {ind.short}
-                  </button>
-                );
-              })}
+            <div>
+              <div className="flex items-center gap-2 mb-2">
+                <Zap className="w-3.5 h-3.5 text-amber-400/80" />
+                <span className="mono text-[10px] tracking-[0.2em] uppercase text-stone-400">Tier</span>
+                <a href="https://console.anthropic.com/settings/limits" target="_blank" rel="noreferrer"
+                   className="text-[10px] text-stone-500 underline hover:text-amber-300 ml-auto">Check →</a>
+              </div>
+              <div className="grid grid-cols-4 gap-1">
+                {Object.entries(TIERS).map(([key, t]) => {
+                  const active = tier === key;
+                  return (
+                    <button key={key} onClick={() => setTier(key)} disabled={running}
+                      className={`text-center p-2 rounded border text-[10px] transition disabled:opacity-50 ${
+                        active ? 'border-amber-400/60 bg-amber-500/10 text-amber-200' : 'border-stone-800 bg-stone-900/40 text-stone-400 hover:border-stone-700'
+                      }`}>
+                      {t.label.split(' ')[0]} {t.label.split(' ')[1]}
+                    </button>
+                  );
+                })}
+              </div>
             </div>
           </div>
         </div>
@@ -396,15 +341,14 @@ export default function App() {
         <div className="mb-6 flex items-center justify-between text-xs text-stone-500">
           <span className="flex items-center gap-1.5">
             <DollarSign size={11} />
-            Est cost: <span className="mono text-amber-300/80">${cost.toFixed(2)}</span>
-            <span className="text-stone-600">· {totalCalls} API calls · {enabledStrategies.length} strategies × {activeIndustries.length} sectors × 10 picks</span>
+            ~${cost.toFixed(2)} per run · <span className="mono">{totalCalls} API calls</span> · {enabledCategories.length} categories × 10 picks each
           </span>
         </div>
 
-        <button onClick={() => runAgent(false)} disabled={running || !apiKey || enabledStrategies.length === 0}
+        <button onClick={() => runAgent(false)} disabled={running || !apiKey || enabledCategories.length === 0}
           className="w-full py-4 rounded-xl bg-gradient-to-r from-amber-500 to-amber-400 text-stone-950 font-medium hover:from-amber-400 hover:to-amber-300 disabled:opacity-40 disabled:cursor-not-allowed transition flex items-center justify-center gap-2">
           {running ? (
-            <><Loader2 size={16} className="animate-spin" /> Running multi-strategy scan...</>
+            <><Loader2 size={16} className="animate-spin" /> Running scan...</>
           ) : (
             <span className="tracking-wide">{hasResults ? 'RUN AGAIN' : 'DEPLOY AGENT'}</span>
           )}
@@ -412,18 +356,17 @@ export default function App() {
 
         {regimeFromCache && hasResults && (
           <button onClick={() => runAgent(true)} disabled={running}
-            className="w-full mt-2 mb-6 text-xs text-stone-500 hover:text-amber-300 transition py-1 mono tracking-wider uppercase">
-            ↻ refresh market valuation (cached, &lt;5min old)
+            className="w-full mt-2 text-xs text-stone-500 hover:text-amber-300 transition py-1 mono tracking-wider uppercase">
+            ↻ refresh market valuation
           </button>
         )}
 
         {!apiKey && !keyEditing && <p className="my-3 text-center text-xs text-amber-400/80">Add your Anthropic API key above.</p>}
         {fatalError && <div className="mt-6"><ApiError error={fatalError} onRetry={() => runAgent(true)} contextLabel="The agent stopped" /></div>}
-        {regimeError && !fatalError && <div className="mt-6"><ApiError error={regimeError} onRetry={() => runAgent(true)} contextLabel="Market valuation scan failed" /></div>}
 
         {running && activeQueue && (
           <div className="mt-6">
-            <QueueStatus queue={activeQueue} totalExpected={totalCalls} label={`${TIERS[tier]?.label || 'Tier 1'} · ${enabledStrategies.length}×${activeIndustries.length} scans`} />
+            <QueueStatus queue={activeQueue} totalExpected={totalCalls} label={`${TIERS[tier]?.label || 'Tier 1'} · scanning ${enabledCategories.length} categories`} />
           </div>
         )}
 
@@ -432,30 +375,55 @@ export default function App() {
           <div className="mt-8">
             {regime && <RegimeCard regime={regime} fromCache={regimeFromCache} />}
 
-            {/* STRATEGY TABS — top level */}
-            <div className="mb-4">
-              <StrategyTabs
-                active={activeStrategy}
-                onChange={setActiveStrategy}
-                enabled={enabledStrategies}
-                completionByStrategy={completionByStrategy}
-              />
+            {/* CATEGORY TABS */}
+            <div className="mb-4 flex p-1 rounded-xl border border-stone-800 bg-stone-950/60 overflow-x-auto">
+              {Object.values(CATEGORIES).map((c) => {
+                const Icon = ICON_MAP[c.icon] || TrendingUp;
+                const isActive = activeCategory === c.id;
+                const isEnabled = enabledCategories.includes(c.id);
+                const status = completion[c.id];
+                const data = categoryData[c.id]?.data;
+                const pickCount = data?.picks?.length || 0;
+                return (
+                  <button
+                    key={c.id}
+                    onClick={() => setActiveCategory(c.id)}
+                    disabled={!isEnabled}
+                    className={`flex items-center gap-2 text-xs px-3 py-2 rounded-lg transition flex-shrink-0 ${
+                      isActive ? 'bg-amber-400/20 text-amber-200'
+                        : isEnabled ? 'text-stone-400 hover:text-stone-200 hover:bg-stone-900/60'
+                        : 'text-stone-600 cursor-not-allowed'
+                    }`}
+                    title={c.description}
+                  >
+                    <Icon size={13} style={{ color: isActive ? undefined : c.color, opacity: isActive ? 1 : 0.8 }} />
+                    <span className="font-medium">{c.label}</span>
+                    {status === 'loading' && <Loader2 size={10} className="animate-spin" />}
+                    {status === 'error' && <AlertCircle size={10} className="text-rose-400" />}
+                    {status === 'done' && pickCount > 0 && (
+                      <span className="text-[10px] mono text-stone-500">{pickCount}</span>
+                    )}
+                  </button>
+                );
+              })}
             </div>
 
-            {/* Sub-tabs */}
+            {/* Sub-tabs: List / Dashboard */}
             <div className="mb-6 flex items-center justify-between gap-3 flex-wrap">
-              <div className="flex p-1 rounded-xl border border-stone-800 bg-stone-950/60 flex-wrap">
-                <ViewTab active={view === 'top'} onClick={() => setView('top')}
-                         icon={<Target className="w-3.5 h-3.5" />} label="Top Picks" />
+              <div className="flex p-1 rounded-xl border border-stone-800 bg-stone-950/60">
+                <ViewTab active={view === 'list'} onClick={() => setView('list')}
+                         icon={<Target className="w-3.5 h-3.5" />} label="10 Picks" />
                 <ViewTab active={view === 'dashboard'} onClick={() => setView('dashboard')}
                          icon={<LayoutDashboard className="w-3.5 h-3.5" />} label="Dashboard" />
-                <ViewTab active={view === 'industries'} onClick={() => setView('industries')}
-                         icon={<ListTree className="w-3.5 h-3.5" />} label="By Sector" />
               </div>
               <div className="text-xs text-stone-500">
-                {loadingCount > 0 && `${loadingCount} loading · `}
-                {errorCount > 0 && `${errorCount} failed · `}
-                {completedCount} of {activeIndustries.length} sectors ({STRATEGIES[activeStrategy]?.label})
+                {activeData?.status === 'loading' && 'Loading...'}
+                {activeData?.status === 'error' && (
+                  <button onClick={() => retryCategory(activeCategory)} className="text-rose-300 hover:text-rose-200 underline">
+                    Failed — retry
+                  </button>
+                )}
+                {activeData?.status === 'done' && `${activePicks.length} picks · ${CATEGORIES[activeCategory]?.horizon}`}
               </div>
             </div>
 
@@ -468,44 +436,51 @@ export default function App() {
               />
             </div>
 
-            {view === 'top' && (
-              <StrategyTopPicks
-                strategyId={activeStrategy}
-                picks={agg.topConviction}
-                limit={15}
-                watchlist={watchlist}
-                onTickerClick={(t) => setDeepDiveTicker(t)}
-                onToggleWatch={toggleWatch}
-              />
+            {activeData?.status === 'error' && (
+              <ApiError error={activeData.error} onRetry={() => retryCategory(activeCategory)} contextLabel={`${CATEGORIES[activeCategory]?.label} scan failed`} />
             )}
 
-            {view === 'dashboard' && (
-              <Dashboard
-                strategyId={activeStrategy}
-                aggregate={agg}
-                onSectorClick={scrollToSector}
-                onTickerClick={(t) => setDeepDiveTicker(t)}
-                watchlist={watchlist}
-                onToggleWatch={toggleWatch}
-              />
+            {activeData?.status === 'loading' && (
+              <div className="bg-white/[0.02] border border-white/10 rounded-xl p-12 text-center">
+                <Loader2 size={28} className="text-amber-300 animate-spin mx-auto mb-3" />
+                <div className="text-sm text-stone-300">Scanning {CATEGORIES[activeCategory]?.label}...</div>
+                <div className="text-xs text-stone-500 mt-1">10 picks · 4-bucket scoring · sourcing from SEC + openinsider + fundamentals</div>
+              </div>
             )}
 
-            {view === 'industries' && (
-              <div className="space-y-6">
-                {activeIndustries.map((ind) => (
-                  <StrategySection
-                    key={`${activeStrategy}-${ind.id}`}
-                    strategyId={activeStrategy}
-                    sectionId={`sector-${activeStrategy}-${ind.id}`}
-                    industry={ind}
-                    state={activeStrategyData[ind.id] || { status: 'pending' }}
-                    onRetry={() => retrySector(activeStrategy, ind.id)}
+            {activeData?.status === 'done' && view === 'list' && (
+              <div className="space-y-3">
+                {activeData?.data?.categoryNotes && (
+                  <div className="p-3 rounded-lg bg-white/[0.03] border border-white/10 text-sm text-stone-300">
+                    <span className="text-[10px] uppercase tracking-wider text-amber-300/70 mr-2">Category outlook:</span>
+                    {activeData.data.categoryNotes}
+                  </div>
+                )}
+                {activePicks.map((p, i) => (
+                  <CategoryPickCard
+                    key={`${p.ticker}-${i}`}
+                    pick={p}
                     onTickerClick={(t) => setDeepDiveTicker(t)}
                     watchlist={watchlist}
                     onToggleWatch={toggleWatch}
                   />
                 ))}
+                {activeSources.length > 0 && (
+                  <div className="mt-6 p-4 rounded-xl border border-stone-800 bg-stone-950/60">
+                    <SourceList sources={activeSources} label={`Run-level sources for ${CATEGORIES[activeCategory]?.label}`} />
+                  </div>
+                )}
               </div>
+            )}
+
+            {activeData?.status === 'done' && view === 'dashboard' && (
+              <Dashboard
+                categoryId={activeCategory}
+                picks={activePicks}
+                onTickerClick={(t) => setDeepDiveTicker(t)}
+                watchlist={watchlist}
+                onToggleWatch={toggleWatch}
+              />
             )}
           </div>
         )}
@@ -517,7 +492,7 @@ export default function App() {
                 <Eye className="w-6 h-6 text-stone-600" />
               </div>
               <p className="text-stone-500 max-w-md mx-auto">
-                Pick strategies + sectors, then deploy. Each strategy returns 10 picks per sector scored on its own framework.
+                Enable categories, hit Deploy. Each category returns 10 stocks with composite score, recommendation, 12-month prediction, and source URLs.
               </p>
             </div>
             <div className="max-w-md mx-auto">
@@ -530,7 +505,7 @@ export default function App() {
         {hasResults && (
           <div className="mt-16 pt-8 border-t border-stone-900 text-[11px] text-stone-600 leading-relaxed mono tracking-wide">
             <p>
-              V-Stock generates research candidates across 4 strategies using AI + web search. Day-trade and swing-trade signals are especially noisy — verify technicals on your charting tool. Always cross-check fundamentals against SEC EDGAR. Not investment advice.
+              V-Stock generates 10 recommendations per category using AI + web search. AI can hallucinate financial numbers — always verify the picks against SEC EDGAR (sec.gov/edgar), openinsider.com, and the company's own filings before risking capital. Recommendations are research candidates, not financial advice.
             </p>
           </div>
         )}
@@ -548,7 +523,7 @@ export default function App() {
 
       <AdvisorChat
         apiKey={apiKey}
-        picks={agg.allPicks || []}
+        picks={allLoadedPicks}
         regime={regime}
         watchlist={watchlist}
         onTickerClick={(t) => setDeepDiveTicker(t)}
